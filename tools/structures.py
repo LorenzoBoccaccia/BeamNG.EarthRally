@@ -1,0 +1,548 @@
+#!/usr/bin/env python3
+"""Bridges and tunnels along a stage's own road, from OpenStreetMap tags.
+
+    python tools/structures.py [--only=sidewalks] editions/svolte-di-popoli [leg id ...]
+
+Reads <edition>/geometry/<leg id>.json of the special stages (or the legs named) and writes `"structures"` into it: a list of
+{ "from": m, "to": m, "kind": "bridge" | "tunnel", "way": <OSM way id> } in metres along the line, the spans where the stage's own road
+is a bridge or a tunnel way. The rest of the file is left as it is (the route is not asked again). tools/fetch_route.py calls
+record() for the specials it writes. mod/.../curate.lua reads them as the spans the ground shaping leaves alone, and shape.lua pins
+the shaped ground to the deck's height at each end of one.
+
+Only the stage's own way counts. A viaduct over the road (the A25 over the Svolte di Popoli's SR17) is a bridge way near the line too,
+but the line is not on it: it crosses at an angle and the road itself is another way, so a span needs the bridge or tunnel way to be
+the nearest drivable way that runs the same way as the line (within ANGLE_DEG of it) for the whole stretch, and the stage's own road
+at that place must not be a way without the tag. A culvert is not a tunnel the road is in.
+
+A tunnel the line does not run in but passes over or beside (the A25's tunnel under the hill the Svolte di Popoli's stage road
+climbs) is recorded as `"tunnelsBeside"`: [{ "from": m, "to": m, "way": <OSM way id> }], the stretches of the line within
+TUNNEL_NEAR_M of a tunnel way's axis. Earth builds the tunnel's tube and portals and shapes the terrain for them (holes at the mouths, the
+ground raised over a low arch), so the ground shaping leaves the ground along those stretches as Earth made it.
+
+The stretches of the stage's own road that have sidewalks are recorded as `"sidewalks"`: [{ "from": m, "to": m, "way": <OSM way id> }]:
+the road's own way tagged with one (sidewalk=both|left|right|yes, or sidewalk:both / :left / :right=yes), or a sidewalk mapped as a way of
+its own (footway=sidewalk) running along the line within SIDEWALK_NEAR_M of it. The pace notes call "don't cut" on a corner there
+(pacenotes.lua): cutting it puts a wheel over the kerb.
+
+Every other road near the line is recorded as `"otherRoads"`: [{ "way": <OSM way id>, "hw": half width m, "pts": [[lat, lon], ...] }], the pieces of the
+drivable ways that are within OTHER_NEAR_M of the line and not the stage's own road (a piece within OWN_M of the line is the road itself, the
+carriageway the line runs on, or a crossing road's own crossing, which is the stage road's ground too), without the bridges and tunnels (the
+ground under a deck belongs to what is below it; a tunnel's is Earth's, `tunnelsBeside`). The ground shaping never moves the ground of those
+(a carriageway, its shoulders and a margin) beyond the stage road's own footprint: a motorway beside the road, a crossing road, a road that
+leaves it.
+
+Network: overpass-api.de, and api.openstreetmap.org when Overpass does not answer (read only). The matching (spans()) is pure.
+"""
+import json
+import math
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+R_EARTH = 6371008.8
+OVERPASS = ("https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
+SAMPLE_M = 4.0              # the line is looked at every this many metres
+MATCH_M = 9.0               # a way within this of the line (centre to centre) can be the road the line runs on
+ANGLE_DEG = 20.0            # ... when it runs within this of the line's direction (an overpass crosses at a larger angle; the A25
+                            # crosses the SR17 at 22 and 31 degrees)
+TIE_M = 1.5                 # a bridge or tunnel way must be this much nearer than a plain one to be the road the line is on
+MERGE_GAP_M = 12.0          # two spans of one kind closer than this along the line are one
+MIN_SPAN_M = 6.0            # a shorter stretch is a mismatch, not a bridge
+LONG_LEG_M = 60000.0       # a leg longer than this gets its ways from the Overture tiles, not from Overpass (record_all)
+CHUNK_M = 1500.0           # the Overpass queries cover the line in pieces this long
+TUNNEL_NEAR_M = 30.0        # a tunnel way's axis this near the line: Earth's portal holes and arch raise reach about 12 m from the axis, and the shaping
+                            # reaches 11.5 m from the line (shape.CORE_M + shape.BLEND_M), a point of the line 10 m apart
+AROUND_M = TUNNEL_NEAR_M + 5.0
+OTHER_NEAR_M = 30.0         # a piece of another road this near the line is recorded: the shaping reaches 11.5 m from the line (shape.CORE_M + BLEND_M)
+                            # and keeps clear of another road's ground by its half width, a margin and a fade (about 12 m for a motorway)
+OWN_M = 5.0                 # a point of a way this near the line is the stage's own road (the OpenStreetMap way and Earth's route differ by a metre or
+                            # two), or a crossing road's crossing: the ground under it is the stage road's, not another road's
+OTHER_STEP_M = 2.0          # the ways are looked at every this many metres
+OTHER_HALF_M = {"motorway": 6.5, "trunk": 6.0, "primary": 4.5, "secondary": 4.0, "tertiary": 3.5, "unclassified": 3.0, "residential": 3.0,
+                "living_street": 2.5, "service": 2.0, "track": 1.5, "road": 3.0, "motorway_link": 4.0, "trunk_link": 4.0,
+                "primary_link": 3.5, "secondary_link": 3.5, "tertiary_link": 3.0}   # the carriageway's half width with its shoulders, by class
+LANE_M = 3.5
+DRIVABLE = {"motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "service", "track",
+            "living_street", "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link", "road"}
+SIDEWALK_TAGS = ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right")
+SIDEWALK_YES = {"both", "left", "right", "yes"}
+SIDEWALK_NEAR_M = 12.0      # a separately mapped sidewalk this near the line (centre to centre) runs along the road
+NOT_A_TUNNEL = {"no", "culvert", "flooded", "avalanche_protector"}      # (a culvert carries water under the road, not the road)
+NOT_A_BRIDGE = {"no"}
+_overpass_down = []         # [True] once Overpass did not answer: the OpenStreetMap API for the rest of the run
+
+
+def kind_of(tags):
+    """'bridge', 'tunnel' or None for a way's tags."""
+    if tags.get("bridge") and tags["bridge"] not in NOT_A_BRIDGE:
+        return "bridge"
+    if tags.get("tunnel") and tags["tunnel"] not in NOT_A_TUNNEL:
+        return "tunnel"
+    return None
+
+
+def _scales(lat):
+    p = math.radians(lat)
+    return (111132.92 - 559.82 * math.cos(2 * p) + 1.175 * math.cos(4 * p),
+            111412.84 * math.cos(p) - 93.5 * math.cos(3 * p))
+
+
+def hav(a, b):
+    p1, p2 = math.radians(a[0]), math.radians(b[0])
+    dl = math.radians(b[1] - a[1])
+    h = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R_EARTH * math.asin(math.sqrt(h))
+
+
+def _seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2)) if l2 > 1e-9 else 0.0
+    return math.hypot(px - (ax + dx * t), py - (ay + dy * t))
+
+
+def _angle_between(dx1, dy1, dx2, dy2):
+    """The angle between two directions in degrees, 0..90 (a road has no front)."""
+    a = abs(math.degrees(math.atan2(dx1 * dy2 - dy1 * dx2, dx1 * dx2 + dy1 * dy2)))
+    return min(a, 180.0 - a)
+
+
+def spans(points, ways, sample_m=SAMPLE_M):
+    """The bridge and tunnel spans of a line. points: [(lat, lon, ...)]; ways: [{"id", "tags", "geometry": [(lat, lon), ...]}].
+    Returns [{"from", "to", "kind", "way"}] in metres along the line (rounded to 0.1 m), in order."""
+    if len(points) < 2:
+        return []
+    lat0, lon0 = points[0][0], points[0][1]
+    mlat, mlon = _scales(lat0)
+
+    def xy(p):
+        return ((p[1] - lon0) * mlon, (p[0] - lat0) * mlat)
+
+    line = [xy(p) for p in points]
+    segs = []                                       # the drivable ways' segments: (ax, ay, bx, by, kind, way id)
+    for w in ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") not in DRIVABLE:
+            continue
+        g = [xy(p) for p in w["geometry"]]
+        k = kind_of(tags)
+        for a, b in zip(g, g[1:]):
+            segs.append((a[0], a[1], b[0], b[1], k, w["id"]))
+    # the line at an even step: (s, x, y, direction)
+    samples, s_off = [], 0.0
+    for (ax, ay), (bx, by) in zip(line, line[1:]):
+        seg = math.hypot(bx - ax, by - ay)
+        if seg < 1e-6:
+            continue
+        n = max(1, int(math.ceil(seg / sample_m)))
+        for q in range(n):
+            f = (q + 0.5) / n
+            samples.append((s_off + seg * f, ax + (bx - ax) * f, ay + (by - ay) * f, (bx - ax) / seg, (by - ay) / seg))
+        s_off += seg
+    tagged = []                                     # per sample: (kind, way id) of the road it is on, or None
+    for s, x, y, dx, dy in samples:
+        near_plain, near_struct = None, None        # the nearest way without a structure tag, and the nearest with one
+        for ax, ay, bx, by, k, wid in segs:
+            if min(ax, bx) - MATCH_M > x or max(ax, bx) + MATCH_M < x or min(ay, by) - MATCH_M > y or max(ay, by) + MATCH_M < y:
+                continue
+            if _angle_between(dx, dy, bx - ax, by - ay) > ANGLE_DEG:
+                continue                            # (an overpass or an underpass crossing the line: not the road it runs on)
+            d = _seg_dist(x, y, ax, ay, bx, by)
+            if d > MATCH_M:
+                continue
+            if k:
+                if near_struct is None or d < near_struct[0]:
+                    near_struct = (d, k, wid)
+            elif near_plain is None or d < near_plain[0]:
+                near_plain = (d, k, wid)
+        # (a structure way counts only when it is clearly the road: at an overpass's crossing both ways are on the line)
+        if near_struct and (near_plain is None or near_struct[0] + TIE_M < near_plain[0]):
+            tagged.append((near_struct[1], near_struct[2]))
+        else:
+            tagged.append(None)
+    out = []
+    i = 0
+    while i < len(samples):
+        t = tagged[i]
+        if not t:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(samples) and tagged[j + 1] and tagged[j + 1][0] == t[0]:
+            j += 1
+        out.append({"from": samples[i][0] - sample_m / 2, "to": samples[j][0] + sample_m / 2, "kind": t[0], "way": t[1]})
+        i = j + 1
+    merged = []
+    for sp in out:
+        if merged and merged[-1]["kind"] == sp["kind"] and sp["from"] - merged[-1]["to"] < MERGE_GAP_M:
+            merged[-1]["to"] = sp["to"]
+        else:
+            merged.append(dict(sp))
+    total = s_off
+    res = []
+    for sp in merged:
+        sp["from"], sp["to"] = max(0.0, sp["from"]), min(total, sp["to"])
+        if sp["to"] - sp["from"] >= MIN_SPAN_M:
+            res.append({"from": round(sp["from"], 1), "to": round(sp["to"], 1), "kind": sp["kind"], "way": sp["way"]})
+    return res
+
+
+def has_sidewalk(tags):
+    """Does a road's own way carry a sidewalk (not one mapped as a way of its own: "separate")?"""
+    return any(tags.get(k) in SIDEWALK_YES for k in SIDEWALK_TAGS)
+
+
+def is_sidewalk_way(tags):
+    return tags.get("highway") in ("footway", "path") and tags.get("footway") == "sidewalk"
+
+
+def sidewalks(points, ways, sample_m=SAMPLE_M, near_m=SIDEWALK_NEAR_M):
+    """The stretches of the line whose road has a sidewalk: [{"from", "to", "way"}] in metres along the line (0.1 m), in order. The road
+    the line is on at a sample: the nearest drivable way within MATCH_M running its way (as spans()); a sidewalk is on that way's tags, or a
+    footway=sidewalk way within near_m running along the line."""
+    if len(points) < 2:
+        return []
+    lat0, lon0 = points[0][0], points[0][1]
+    mlat, mlon = _scales(lat0)
+
+    def xy(p):
+        return ((p[1] - lon0) * mlon, (p[0] - lat0) * mlat)
+
+    line = [xy(p) for p in points]
+    roads, walks = [], []                           # segments (ax, ay, bx, by, has a sidewalk, way id)
+    for w in ways:
+        tags = w.get("tags") or {}
+        g = [xy(p) for p in w["geometry"]]
+        if tags.get("highway") in DRIVABLE:
+            dest, flag = roads, has_sidewalk(tags)
+        elif is_sidewalk_way(tags):
+            dest, flag = walks, True
+        else:
+            continue
+        for a, b in zip(g, g[1:]):
+            dest.append((a[0], a[1], b[0], b[1], flag, w["id"]))
+    samples, s_off = [], 0.0
+    for (ax, ay), (bx, by) in zip(line, line[1:]):
+        seg = math.hypot(bx - ax, by - ay)
+        if seg < 1e-6:
+            continue
+        n = max(1, int(math.ceil(seg / sample_m)))
+        for q in range(n):
+            f = (q + 0.5) / n
+            samples.append((s_off + seg * f, ax + (bx - ax) * f, ay + (by - ay) * f, (bx - ax) / seg, (by - ay) / seg))
+        s_off += seg
+
+    def nearest(segs, x, y, dx, dy, reach):
+        best = None
+        for ax, ay, bx, by, flag, wid in segs:
+            if min(ax, bx) - reach > x or max(ax, bx) + reach < x or min(ay, by) - reach > y or max(ay, by) + reach < y:
+                continue
+            if _angle_between(dx, dy, bx - ax, by - ay) > ANGLE_DEG:
+                continue
+            d = _seg_dist(x, y, ax, ay, bx, by)
+            if d <= reach and (best is None or d < best[0]):
+                best = (d, flag, wid)
+        return best
+
+    hit = []                                        # per sample: the way that gives it a sidewalk, or None
+    for s, x, y, dx, dy in samples:
+        own = nearest(roads, x, y, dx, dy, MATCH_M)
+        if own and own[1]:
+            hit.append(own[2])
+            continue
+        walk = nearest(walks, x, y, dx, dy, near_m)
+        hit.append(walk[2] if walk else None)
+    out = []
+    i = 0
+    while i < len(samples):
+        if hit[i] is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(samples) and hit[j + 1] is not None:
+            j += 1
+        a, b = max(0.0, samples[i][0] - sample_m / 2), min(s_off, samples[j][0] + sample_m / 2)
+        if out and a - out[-1]["to"] < MERGE_GAP_M:
+            out[-1]["to"] = round(b, 1)
+        else:
+            out.append({"from": round(a, 1), "to": round(b, 1), "way": hit[i]})
+        i = j + 1
+    return [sp for sp in out if sp["to"] - sp["from"] >= MIN_SPAN_M]
+
+
+def tunnels_beside(points, ways, near_m=TUNNEL_NEAR_M, sample_m=SAMPLE_M):
+    """The stretches of a line within near_m of the axis of a tunnel way (the line's own road included: the ground shaping leaves it alone
+    either way). points: [(lat, lon, ...)]; ways as in spans(). Returns [{"from", "to", "way"}] in metres along the line (0.1 m), in order."""
+    if len(points) < 2:
+        return []
+    lat0, lon0 = points[0][0], points[0][1]
+    mlat, mlon = _scales(lat0)
+
+    def xy(p):
+        return ((p[1] - lon0) * mlon, (p[0] - lat0) * mlat)
+
+    segs = []
+    for w in ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") not in DRIVABLE or kind_of(tags) != "tunnel":
+            continue
+        g = [xy(p) for p in w["geometry"]]
+        for a, b in zip(g, g[1:]):
+            segs.append((a[0], a[1], b[0], b[1], w["id"]))
+    if not segs:
+        return []
+    line = [xy(p) for p in points]
+    out, s_off, cur = [], 0.0, None
+    for (ax, ay), (bx, by) in zip(line, line[1:]):
+        seg = math.hypot(bx - ax, by - ay)
+        if seg < 1e-6:
+            continue
+        n = max(1, int(math.ceil(seg / sample_m)))
+        for q in range(n):
+            f = (q + 0.5) / n
+            x, y, s = ax + (bx - ax) * f, ay + (by - ay) * f, s_off + seg * f
+            best = None
+            for sx, sy, ex, ey, wid in segs:
+                if min(sx, ex) - near_m > x or max(sx, ex) + near_m < x or min(sy, ey) - near_m > y or max(sy, ey) + near_m < y:
+                    continue
+                d = _seg_dist(x, y, sx, sy, ex, ey)
+                if d <= near_m and (best is None or d < best[0]):
+                    best = (d, wid)
+            if best:
+                if cur and cur["way"] == best[1] and s - cur["to"] <= sample_m * 1.5:
+                    cur["to"] = s + sample_m / 2
+                else:
+                    cur = {"from": max(0.0, s - sample_m / 2), "to": s + sample_m / 2, "way": best[1]}
+                    out.append(cur)
+        s_off += seg
+    merged = []
+    for t in out:
+        if merged and t["from"] - merged[-1]["to"] < MERGE_GAP_M:
+            merged[-1]["to"] = max(merged[-1]["to"], t["to"])
+        else:
+            merged.append(dict(t))
+    return [{"from": round(t["from"], 1), "to": round(min(t["to"], s_off), 1), "way": t["way"]} for t in merged]
+
+
+def half_width(tags):
+    """The half width (m) of a way's ground, carriageway and shoulders: a width tag, else the class's, widened by the lanes tag."""
+    try:
+        w = float(str(tags.get("width", "")).split()[0])
+        if 1.0 <= w <= 40.0:
+            return round(w / 2.0, 2)
+    except (ValueError, IndexError):
+        pass
+    hw = OTHER_HALF_M.get(tags.get("highway"), 3.0)
+    try:
+        lanes = int(str(tags.get("lanes", "")).split(";")[0])
+        if 1 <= lanes <= 8:
+            hw = max(hw, lanes * LANE_M / 2.0 + 0.5)
+    except (ValueError, IndexError):
+        pass
+    return round(hw, 2)
+
+
+def other_roads(points, ways, near_m=OTHER_NEAR_M, own_m=OWN_M, step_m=OTHER_STEP_M):
+    """The pieces of the drivable ways within near_m of a line that are not the stage's own road (see the module's text): a list of
+    {"way": id, "hw": half width, "pts": [[lat, lon], ...]} (pieces of at least two points, 6 decimals), in the order of the ways.
+    points: [(lat, lon, ...)]; ways as in spans(). Bridges and tunnels are left out."""
+    if len(points) < 2:
+        return []
+    lat0, lon0 = points[0][0], points[0][1]
+    mlat, mlon = _scales(lat0)
+
+    def xy(p):
+        return ((p[1] - lon0) * mlon, (p[0] - lat0) * mlat)
+
+    line = [xy(p) for p in points]
+    cell = max(near_m, 20.0)
+    grid = {}                                       # the line's segments by cell, for the nearest distance
+    for k, ((ax, ay), (bx, by)) in enumerate(zip(line, line[1:])):
+        for gx in range(int(math.floor((min(ax, bx) - near_m) / cell)), int(math.floor((max(ax, bx) + near_m) / cell)) + 1):
+            for gy in range(int(math.floor((min(ay, by) - near_m) / cell)), int(math.floor((max(ay, by) + near_m) / cell)) + 1):
+                grid.setdefault((gx, gy), []).append(k)
+
+    def dist_to_line(x, y):
+        best = None
+        for k in grid.get((int(math.floor(x / cell)), int(math.floor(y / cell))), ()):
+            (ax, ay), (bx, by) = line[k], line[k + 1]
+            d = _seg_dist(x, y, ax, ay, bx, by)
+            if best is None or d < best:
+                best = d
+        return best
+
+    out = []
+    for w in ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") not in DRIVABLE or kind_of(tags):
+            continue
+        g = w["geometry"]
+        gxy = [xy(p) for p in g]
+        samples = [(gxy[0][0], gxy[0][1], g[0][0], g[0][1])]        # the way at an even step: (x, y, lat, lon)
+        for i in range(len(g) - 1):
+            (ax, ay), (bx, by) = gxy[i], gxy[i + 1]
+            n = max(1, int(math.ceil(math.hypot(bx - ax, by - ay) / step_m)))
+            for q in range(1, n + 1):
+                f = q / n
+                samples.append((ax + (bx - ax) * f, ay + (by - ay) * f, g[i][0] + (g[i + 1][0] - g[i][0]) * f,
+                                g[i][1] + (g[i + 1][1] - g[i][1]) * f))
+        pieces, run = [], []
+        for x, y, la, lo in samples:
+            d = dist_to_line(x, y)
+            if d is not None and own_m < d <= near_m:
+                run.append([round(la, 6), round(lo, 6)])
+            else:
+                if len(run) >= 2:
+                    pieces.append(run)
+                run = []
+        if len(run) >= 2:
+            pieces.append(run)
+        hw = half_width(tags)
+        for piece in pieces:
+            out.append({"way": w["id"], "hw": hw, "pts": piece})
+    return out
+
+
+def fetch_ways(points):
+    """The drivable ways near a line, with their tags and geometry, from Overpass (in pieces along the line)."""
+    pts = [(p[0], p[1]) for p in points]
+    ways = {}
+    chunk, run = [pts[0]], 0.0
+    pieces = []
+    for a, b in zip(pts, pts[1:]):
+        run += hav(a, b)
+        chunk.append(b)
+        if run >= CHUNK_M:
+            pieces.append(chunk)
+            chunk, run = [b], 0.0
+    if len(chunk) > 1:
+        pieces.append(chunk)
+    for piece in pieces:
+        # (the piece's box and a margin: the public servers answer a box at once and are slow with a polyline's `around`)
+        pad = AROUND_M / 111000.0
+        s_, n_ = min(p[0] for p in piece) - pad, max(p[0] for p in piece) + pad
+        w_, e_ = min(p[1] for p in piece) - pad * 1.4, max(p[1] for p in piece) + pad * 1.4
+        q = '[out:json][timeout:90];way["highway"](%.6f,%.6f,%.6f,%.6f);out tags geom;' % (s_, w_, n_, e_)
+        data = None
+        for attempt in range(0 if _overpass_down else 3):      # (the public servers are busy at times: the other mirror, then a pause)
+            url = OVERPASS[attempt % len(OVERPASS)]
+            try:
+                req = urllib.request.Request(url, data=urllib.parse.urlencode({"data": q}).encode(),
+                                             headers={"User-Agent": "BeamNG.EarthRally-tools/0.1 (structures)"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    data = json.loads(r.read())
+                break
+            except Exception as e:
+                print("  overpass %s: %s" % (url, e), file=sys.stderr)
+                time.sleep(3 * (attempt + 1))
+        if data is None:
+            _overpass_down[:] = [True]                  # (not asked again for the other pieces of this run)
+        if data is not None:
+            found = [{"id": el["id"], "tags": el.get("tags", {}), "geometry": [(n["lat"], n["lon"]) for n in el["geometry"]]}
+                     for el in data.get("elements", []) if el.get("type") == "way" and el.get("geometry")]
+        else:
+            print("  no Overpass answer: the OpenStreetMap API's map call instead", file=sys.stderr)
+            found = osm_api_ways(s_, w_, n_, e_)
+        for w in found:
+            ways[w["id"]] = w
+    return list(ways.values())
+
+
+def osm_api_ways(s, w, n, e):
+    """The highway ways of a small box from the OpenStreetMap API (0.6 map call: the ways that touch the box with all their nodes)."""
+    url = "https://api.openstreetmap.org/api/0.6/map?bbox=%.6f,%.6f,%.6f,%.6f" % (w, s, e, n)
+    req = urllib.request.Request(url, headers={"User-Agent": "BeamNG.EarthRally-tools/0.1 (structures)"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        root = ET.fromstring(r.read())
+    nodes = {nd.get("id"): (float(nd.get("lat")), float(nd.get("lon"))) for nd in root.iter("node")}
+    out = []
+    for el in root.iter("way"):
+        tags = {t.get("k"): t.get("v") for t in el.findall("tag")}
+        if "highway" not in tags:
+            continue
+        geom = [nodes[nd.get("ref")] for nd in el.findall("nd") if nd.get("ref") in nodes]
+        if len(geom) >= 2:
+            out.append({"id": int(el.get("id")), "tags": tags, "geometry": geom})
+    return out
+
+
+def record(points):
+    """The structures of a leg's points from OpenStreetMap: [{from, to, kind, way}]."""
+    return spans(points, fetch_ways(points))
+
+
+def ways_from_overture(points, margin_m=45.0):
+    """The ways near a long line, from the Overture road tiles tools/roadnet.py keeps (their bridge and tunnel flags and classes), in the
+    form fetch_ways gives: [{id, tags, geometry}]. A 490 km stage is 330 Overpass pieces of 1.5 km; this asks the network nothing the
+    stage's own route did not (the tiles along it are read already)."""
+    import roadnet
+    ways = []
+    for seg in roadnet.roads_along(points, margin_m):
+        tags = {"highway": seg["cls"]}
+        if "is_bridge" in seg.get("flags", ()):
+            tags["bridge"] = "yes"
+        if "is_tunnel" in seg.get("flags", ()):
+            tags["tunnel"] = "yes"
+        ways.append({"id": seg["id"], "tags": tags, "geometry": [(p[0], p[1]) for p in seg["line"]]})
+    return ways
+
+
+def record_all(points, long_leg=False):
+    """(structures, tunnelsBeside, otherRoads, sidewalks) of a leg's points: one fetch of the ways. A long leg's ways come from the
+    Overture tiles (ways_from_overture) and its otherRoads and sidewalks are left out: the shaping of the ground beside a stage has them
+    for the short specials only, and the tiles carry no sidewalks."""
+    if long_leg:
+        ways = ways_from_overture(points)
+        return spans(points, ways), tunnels_beside(points, ways), [], []
+    ways = fetch_ways(points)
+    return spans(points, ways), tunnels_beside(points, ways), other_roads(points, ways), sidewalks(points, ways)
+
+
+def update_file(path, only=None):
+    """Writes the structures into a geometry file, leaving the rest as it is (only: the keys written, the others kept as they are).
+    Returns the list."""
+    with open(path, encoding="utf-8") as f:
+        geo = json.load(f)
+    found, beside, others, walks = record_all(geo["points"], long_leg=geo.get("lengthM", 0) > LONG_LEG_M)
+    for key, val in (("structures", found), ("tunnelsBeside", beside), ("otherRoads", others), ("sidewalks", walks)):
+        if only and key not in only:
+            continue
+        if val:
+            geo[key] = val
+        else:
+            geo.pop(key, None)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(geo, f, separators=(",", ":"))
+    return found
+
+
+def main():
+    args = sys.argv[1:]
+    only = None
+    if args and args[0].startswith("--only="):          # (--only=sidewalks: those keys written, the rest of the file as it was)
+        only = set(args.pop(0).split("=", 1)[1].split(","))
+    if not args:
+        raise SystemExit(__doc__)
+    ed = args[0]
+    legs = json.load(open(os.path.join(ed, "legs.json"), encoding="utf-8"))["legs"]
+    want = args[1:] or [l["id"] for l in legs if l["type"] == "special"]
+    for lid in want:
+        path = os.path.join(ed, "geometry", lid + ".json")
+        found = update_file(path, only)
+        print("%s: %d structure(s)%s" % (lid, len(found), "".join(
+            "\n  %s %.0f..%.0f m (OSM way %s)" % (s["kind"], s["from"], s["to"], s["way"]) for s in found)))
+        beside = json.load(open(path, encoding="utf-8")).get("tunnelsBeside", [])
+        print("%s: %d stretch(es) beside a tunnel%s" % (lid, len(beside), "".join(
+            "\n  %.0f..%.0f m (OSM way %s)" % (s["from"], s["to"], s["way"]) for s in beside)))
+        others = json.load(open(path, encoding="utf-8")).get("otherRoads", [])
+        print("%s: %d piece(s) of other roads near the line (%d way(s))" % (lid, len(others), len({o["way"] for o in others})))
+        walks = json.load(open(path, encoding="utf-8")).get("sidewalks", [])
+        print("%s: %d stretch(es) with sidewalks%s" % (lid, len(walks), "".join(
+            "\n  %.0f..%.0f m (OSM way %s)" % (w["from"], w["to"], w["way"]) for w in walks)))
+
+
+if __name__ == "__main__":
+    main()
