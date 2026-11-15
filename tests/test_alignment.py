@@ -159,15 +159,20 @@ def test_every_join_of_the_geometry_is_driven_into_from_behind_and_straight(ed):
         assert joins.check(pa, pb)["ok"]
 
 
-def test_popoli_ends_its_transfer_up_the_sr17_past_the_turn_and_not_near_the_underpass():
+def test_popoli_s_transfer_goes_under_the_railway_on_the_sr17_into_the_stage_start():
     edition, geo = load("svolte-di-popoli")
     road, ss = geo["road1"]["points"], geo["ss1"]["points"]
-    # the stage starts past the junction the transfer turns onto the SR17 at, which is south of it, heading north
+    # from the car park in Popoli Terme, south of the railway, up the SR17 through its underpass (42.1710, 13.8247: a
+    # road on the ground under the railway's bridges with BeamNG.Earth's fix, TecnaGamer/BeamNG.Earth#1341)
+    assert road[0][0] < 42.1705
+    under = min(range(len(road)), key=lambda i: joins.metres(road[i][:2], (42.1710, 13.8247)))
+    assert joins.metres(road[under][:2], (42.1710, 13.8247)) < 15
+    b = joins.bearing(road[under - 1], road[under + 1])
+    assert b < 20 or b > 300                                                  # heading north-west, up the SR17
+    # and on up the SR17 into the stage start from behind: arriving heading north, the stage north of the underpass
     assert ss[0][0] > 42.1745
-    assert joins.bearing(road[-2], road[-1]) < 20 or joins.bearing(road[-2], road[-1]) > 340      # arriving heading north
-    # the blocked railway underpass (42.1710, 13.8247) is nowhere near either leg
-    for p in road + ss:
-        assert joins.metres(p[:2], (42.1710, 13.8247)) > 300
+    assert joins.bearing(road[-2], road[-1]) < 20 or joins.bearing(road[-2], road[-1]) > 340
+    assert all(joins.metres(p[:2], (42.1710, 13.8247)) > 300 for p in ss)  # (the stage itself stays north of it)
 
 
 @pytest.mark.parametrize("ed", EDITIONS)

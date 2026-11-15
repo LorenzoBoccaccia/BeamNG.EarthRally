@@ -351,8 +351,9 @@ def test_legs_json_picks_the_landmark_side_and_its_reach(world):
 
 
 def test_the_popoli_landmark_stands_on_the_outer_side_of_its_last_bend_by_tc1():
-    # the Svolte di Popoli's TC1, up the SR17 past the left turn the transfer makes onto it (when this was written it
-    # was after a short underpass and a bend to the right)
+    # the Popoli Stage's TC1, at the end of the transfer up the SR17 from the railway underpass: the tower on the outer
+    # side of the bend the road makes over its last OUTER_SIDE_M (the left when it stays straight), worked out here from
+    # the geometry with the rule's own chords
     popoli = os.path.join(ROOT, "editions", "svolte-di-popoli")
     rt = lupa.LuaRuntime(unpack_returned_tuples=True)
     rt.execute("math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end")
@@ -371,7 +372,20 @@ def test_the_popoli_landmark_stands_on_the_outer_side_of_its_last_bend_by_tc1():
     end = road[-1]
     tower = by_id(items, "road1:stagein_tower")
     hx, hy = end[0] - road[-4][0], end[1] - road[-4][1]
-    assert side_of(tower, end, math.atan2(hy, hx)) == 1                # the road bends left onto the SR17: the tower is on the right
+    arc = [0.0]
+    for a, b in zip(road, road[1:]):
+        arc.append(arc[-1] + math.dist(a[:2], b[:2]))
+
+    def at(s):
+        i = max(k for k in range(len(arc)) if arc[k] <= s) if s < arc[-1] else len(arc) - 2
+        f = (s - arc[i]) / max(arc[i + 1] - arc[i], 1e-9)
+        return (road[i][0] + (road[i + 1][0] - road[i][0]) * f, road[i][1] + (road[i + 1][1] - road[i][1]) * f)
+    s0 = max(0.0, arc[-1] - props.OUTER_SIDE_M)
+    a0, a1, b0, b1 = at(s0), at(min(arc[-1], s0 + 40)), at(arc[-1] - 40), at(arc[-1])
+    ax, ay, bx, by = a1[0] - a0[0], a1[1] - a0[1], b1[0] - b0[0], b1[1] - b0[1]
+    turn = math.degrees(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+    want = -1 if abs(turn) < props.OUTER_SIDE_MIN_DEG else (1 if turn > 0 else -1)
+    assert side_of(tower, end, math.atan2(hy, hx)) == want, turn
     assert 12 < min(math.dist((tower["x"], tower["y"]), r) for r in road) < 20
     assert math.dist((tower["x"], tower["y"]), end) < 35
     # and TC1 and the stage start (a few metres apart) are dressed once

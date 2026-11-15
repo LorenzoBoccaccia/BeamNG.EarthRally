@@ -2,7 +2,9 @@
   "edition": "svolte-di-popoli",
   "title": "Popoli Stage",
   "missionPrefix": "earthrally-popoli",
-  "shaping": { "spikeM": 3 },
+  "shaping": {
+    "spikeM": 3
+  },
   "note": "The Svolte di Popoli hillclimb (SR17, Strada Regionale 17 delle Svolte di Popoli, Abruzzo) as a rally loop with a single special stage: from contrada Canapine above Popoli Terme (about 250 m) to San Benedetto in Perillis at the gate of the Navelli plateau (about 725 m), 7.5 km at 6.3 percent. The 'via' points lie on the SR17 line chained from OpenStreetMap, close enough together that OSRM follows its hairpins; tools/fetch_route.py turns them into road geometry (geometry/<id>.json).",
   "legs": [
     {
@@ -11,12 +13,8 @@
       "title": "Service park to stage start",
       "via": [
         [
-          42.17525,
-          13.82296
-        ],
-        [
-          42.17481,
-          13.82352
+          42.169556,
+          13.831528
         ],
         [
           42.174827,
@@ -24,8 +22,8 @@
         ]
       ],
       "speedLimitKph": 50,
-      "parkingNear": 300,
-      "note": "The service park is the car park on the side road west of the SR17 above the railway. The car starts on an aisle of the lot and TC0 is a few metres ahead of it, inside the lot. The transfer leaves by the side road and turns onto the SR17 heading north, and TC1 and the stage start stand about 40 m up the SR17 past that turn, so the transfer is driven into TC1 from behind and the stage carries on straight ahead (tools/joins.py checks it). The SR17's underpass under the railway at 42.1710, 13.8247 (OSM way 479181637, tunnel) is blocked in the game, so neither the transfer nor the stage goes through it."
+      "parkingNear": 150,
+      "note": "The service park is the car park in Popoli Terme at 42.16956, 13.83153 (Piazzale Emilio Alessandrini, by Via Tiburtina). The car starts on an aisle of the lot and TC0 is a few metres ahead of it, inside the lot. The transfer leaves the lot for Via Tiburtina, then Via Beato Nunzio Sulprizio, and turns right onto the SR17 heading north. It passes under the Rome-Pescara railway through the SR17's underpass (OSM way 479181637, mapped as the road's tunnel: BeamNG.Earth makes it a road on the ground under the railway's bridges, with TecnaGamer/BeamNG.Earth#1341) and runs into TC1 and the stage start from behind, the stage carrying on straight ahead (tools/joins.py checks it)."
     },
     {
       "id": "ss1",

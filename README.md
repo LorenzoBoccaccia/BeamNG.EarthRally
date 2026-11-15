@@ -138,12 +138,14 @@ the risks in the pull request that added them: nothing of this was driven in the
 ## Popoli Stage
 
 The second edition, `editions/svolte-di-popoli`: the Svolte di Popoli hillclimb (SR17, Abruzzo) as a rally loop with a
-single special stage, **Popoli Stage** in the mission list. A 0.2 km transfer from a car park above contrada
-Canapine to the start on the SR17 (256 m), then the SR17 up its hairpins to San Benedetto in Perillis at the gate of
+single special stage, **Popoli Stage** in the mission list. A 1.2 km transfer from the car park in Popoli Terme
+(Piazzale Emilio Alessandrini, by Via Tiburtina) to the start on the SR17 above contrada Canapine (256 m), passing under
+the railway through the SR17's underpass, then the SR17 up its hairpins to San Benedetto in Perillis at the gate of
 the Navelli plateau (723 m): 7.4 km, about 470 m of climb (it.wikipedia: 7.53 km, 250 to 725 m, 6.3 percent). The
-service park and the start are north of the SR17's underpass under the railway, which is blocked in the game. The
-stage's `via` points lie on the SR17 line chained from OpenStreetMap, close enough that OSRM follows its hairpins. Drive
-to the service park (42.1749, 13.8231, above contrada Canapine) and start it from the mission list like the testbed; the BeamNG.EarthRally
+underpass needs BeamNG.Earth with TecnaGamer/BeamNG.Earth#1341: without it Earth makes the SR17 a deck on the ground
+through the underpass. The stage's `via` points lie on the SR17 line chained from OpenStreetMap, close enough that OSRM
+follows its hairpins. Drive to the service park (42.1696, 13.8317, Popoli Terme) and start it from the mission list like
+the testbed; the BeamNG.EarthRally
 window has a button per edition for the teleport. Built with the same tools as the testbed below, on
 `editions/svolte-di-popoli`.
 

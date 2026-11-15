@@ -188,7 +188,7 @@ def test_no_ferry_after_the_last_day_or_a_day_without_one(days):
 def test_a_mission_list_start_of_a_day_far_from_its_bivouac_teleports_there_and_then_starts_with_the_lists_settings(days):
     lua = days
     lua.execute("core.onExtensionLoaded()")
-    lua.execute("PLAYER_LL = { 42.1749, 13.8231 }")               # standing at Popoli: day one's bivouac is in the Algarve
+    lua.execute("PLAYER_LL = { 42.1696, 13.8317 }")               # standing at Popoli: day one's bivouac is in the Algarve
     m = lua.eval("(function() return gameplay_missions_missions.getMissionById('beamng_earth/rallyLoop/earthrally-mini-d01') end)()")
     lua.execute("gameplay_missions_missionManager.startWithFade(gameplay_missions_missions.getMissionById('beamng_earth/rallyLoop/earthrally-mini-d01'),"
                 " { setupModuleVehicles = 3 }, {})")
