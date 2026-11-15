@@ -586,7 +586,7 @@ def test_a_menu_start_after_a_loop_was_quit_is_not_held_up(lua):
     lua.execute("LEVEL = 'beamng_earth'; EARTH_IN_LEVEL = true; ANCHOR_LL = { 37.09, -7.99 }; PLAYER_LL = { 37.0884, -7.9865 }")
     lua.execute("core.onUpdate(1)")
     assert logs(lua, "the Earth level is in")
-    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1749, abs=1e-3)  # on its way to the Popoli service park
+    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1696, abs=1e-3)  # on its way to the Popoli service park
 
 
 def test_a_finished_loop_lets_the_markers_follow_the_anchor_again(lua):
@@ -783,8 +783,8 @@ def test_the_second_edition_far_from_its_service_park_says_where_it_is(lua):
 
 def test_a_teleport_to_the_second_edition_goes_to_its_service_park(lua):
     lua.execute("core.start('svolte-di-popoli', true)")
-    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1749, abs=1e-3)
-    assert lua.eval("TELEPORT[2]") == pytest.approx(13.8231, abs=1e-3)
+    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1696, abs=1e-3)
+    assert lua.eval("TELEPORT[2]") == pytest.approx(13.8317, abs=1e-3)
 
 
 def test_every_editions_loop_has_its_start_trigger_on_its_own_service_park(lua):
@@ -810,9 +810,9 @@ def test_every_legs_mission_has_its_marker_on_the_time_control_that_opens_it(lua
     for p in (road1, ss1):
         assert abs(p[0]) < 2000 and abs(p[1]) < 2000 and (p[0], p[1]) != (0, 0)
     # the first liaison opens at TC0, a few metres from the loop's marker on the service park; SS1 at TC1, the end of the
-    # 169 m transfer, about 100 m away
+    # 1.2 km transfer, about 830 m away as the crow flies
     assert math.dist(road1, loop) < 40
-    assert 60 < math.dist(ss1, road1) < 200
+    assert 600 < math.dist(ss1, road1) < 1200
     # the testbed's legs, 2000 km away, are moved too (every edition's)
     far = tc("rallyStage/earthrally-testbed-ss1", 1)
     assert abs(far) > 100000
@@ -957,7 +957,7 @@ def test_the_window_picks_the_edition_its_teleports_go_to(lua):
     lua.execute("core.onUpdate(0.1)")                                             # the pick
     lua.execute("BUTTONS, CLICK = {}, 'Teleport to the service park'")
     lua.execute("core.onUpdate(0.1)")
-    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1749, abs=1e-3)
+    assert lua.eval("TELEPORT[1]") == pytest.approx(42.1696, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

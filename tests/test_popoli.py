@@ -109,7 +109,7 @@ def test_the_transfer_is_short_and_leaves_a_parking_lot_for_the_stage_start(geom
     assert metres((lot["lat"], lot["lon"]), (lot["spawn"]["lat"], lot["spawn"]["lon"])) < 1       # (the car starts on an aisle)
     assert metres(road["points"][0], lot["lead"][-1][:2]) < 1                                    # and TC0, where the lead ends, starts the leg
     assert metres(road["points"][-1], ss["points"][0]) < 1          # the stage starts where the transfer ends
-    assert metres(road["points"][0], (42.1749, 13.8231)) < 50       # the car park north of the railway
+    assert metres(road["points"][0], (42.16956, 13.83153)) < 50     # the car park in Popoli Terme, south of the railway
 
 
 def test_the_special_has_closures_on_its_side_roads(geometry):
