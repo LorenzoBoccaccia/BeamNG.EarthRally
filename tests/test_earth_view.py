@@ -262,6 +262,28 @@ def test_the_framed_picture_has_a_title_a_legend_and_a_scale_bar():
     assert (legend == tuple(int(c * 255) for c in ev.LINE_RGB)).all(axis=2).any()        # the stage line's swatch
 
 
+def test_four_views_make_one_picture_two_per_row_each_labelled():
+    tris, cls = scene()
+    panels, used_all = [], set()
+    for k, (bearing, elev) in enumerate(((0.0, 90.0), (225.0, 35.0), (135.0, 35.0), (0.0, 35.0))):
+        cam = ev.fit_camera(ev.view_camera((0.0, 0.0, 0.0), bearing, elev, 200, 120), tris.reshape(-1, 3))
+        img, used = ev.render(tris, cls, cam, ss=1)
+        panels.append(ev.annotate_panel(img, cam, f"view {k}"))
+        used_all.update(int(u) for u in used)
+    pic = ev.compose(panels, "title", "subtitle", ev.legend_entries(sorted(used_all), False, True))
+    assert pic.size[0] == 2 * 200 + ev.PANEL_GAP and pic.size[1] > 62 + 2 * 120 + ev.PANEL_GAP
+    a = np.asarray(pic)
+    for r in range(2):
+        for c in range(2):
+            y, x = 62 + r * (120 + ev.PANEL_GAP), c * (200 + ev.PANEL_GAP)
+            label = a[y + 1:y + 29, x + 1:x + 60]
+            assert (label > 240).mean() > 0.5 and (label < 100).any()      # each panel's white label with its text
+    gap = a[62:62 + 2 * 120, 200:200 + ev.PANEL_GAP]
+    assert (gap == 255).all()                                                 # the panels apart, on white
+    legend = a[62 + 2 * 120 + ev.PANEL_GAP:]
+    assert (legend == tuple(int(c * 255) for c in ev.NEEDLE_RGB)).all(axis=2).any()
+
+
 def test_the_ground_the_grader_moves_is_magenta_in_the_picture_and_the_legend():
     z = np.zeros((41, 41))
     moved = np.zeros((41, 41), bool)

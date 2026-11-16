@@ -18,14 +18,18 @@ one directional (Lambert) light and a little ambient light, in flat colours:
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
 
-  <name>_top.png            straight down, north up
-  <name>_from_<dir>.png     oblique (--elev degrees above the horizon), the camera on the compass side <dir> looking at the point
-                            (--views top,SW,SE,N by default: any of N NE E SE S SW W NW or a bearing in degrees)
+  <name>.png                every view in one picture, two per row (one snapshot per point, for reading by a person or an LLM):
+                            top    straight down, north up
+                            <dir>  oblique (--elev degrees above the horizon), the camera on the compass side <dir> looking at
+                                   the point (--views top,SW,SE,N by default: any of N NE E SE S SW W NW or a bearing in degrees)
+  <name>_top.png, <name>_from_<dir>.png   each view on its own as well (--separate)
 
-Each has a title (the point, the radius, the Earth tree), a legend of the colours in it, a scale bar and a north arrow.
+A picture has a title (the point, the radius, the Earth tree), a legend of the colours in it, and on each view its name, a
+scale bar and a north arrow. The default radius (40 m) frames a crossing, a deck end or a portal close up; --radius 120 for the
+place around it.
 
   python tools/earth_view.py --earth ../BeamNG.Earth-fork --anchor 42.17,13.83 --aid 2 --xy -446,880 \
-      --geometry editions/svolte-di-popoli/geometry/ss1.json --radius 120 --out view-out
+      --geometry editions/svolte-di-popoli/geometry/ss1.json --out view-out
   python tools/earth_view.py --earth ../BeamNG.Earth-fork --anchor 42.17,13.83 --aid 2 --at 42.1743502,13.8243183 --out view-out --rally \
       --geometry editions/svolte-di-popoli/geometry/ss1.json
 
@@ -404,8 +408,8 @@ def _font(size):
     return ImageFont.load_default(size=size)
 
 
-def frame_picture(img, cam, title, subtitle, used, has_line, has_needle, extra_legend=()):
-    """The map image (H, W, 3 floats) with a title bar above, the scale bar and north arrow on it, the legend below; a PIL image."""
+def annotate_panel(img, cam, label=None):
+    """The map image (H, W, 3 floats) as a PIL image with its scale bar and north arrow, and label (the view) in its top left."""
     from PIL import Image, ImageDraw
     pic = Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8))
     d = ImageDraw.Draw(pic)
@@ -430,28 +434,59 @@ def frame_picture(img, cam, title, subtitle, used, has_line, has_needle, extra_l
     reach = 26 * max(ln, 0.35)
     d.line([cx - ux * 6, cy - uy * 6, cx + ux * reach, cy + uy * reach], fill=(200, 0, 0), width=4)
     d.text((cx + ux * (reach + 6) - 5, cy + uy * (reach + 6) - 9), "N", fill=(200, 0, 0), font=f)
-    # legend
+    if label:
+        lf = _font(18)
+        tw = d.textlength(label, font=lf)
+        d.rectangle([0, 0, tw + 20, 30], fill=(255, 255, 255), outline=(90, 90, 90))
+        d.text((10, 4), label, fill=(0, 0, 0), font=lf)
+    return pic
+
+
+def legend_entries(used, has_line, has_needle, extra_legend=()):
+    """[(rgb 0..255, name)] of the classes drawn (used), the stage line, the needle, and extra_legend."""
     entries = [(tuple(int(c * 255) for c in CLASS_RGB[c]), CLASS_NAME[c]) for c in sorted(set(int(u) for u in used))]
     if has_line:
         entries.append((tuple(int(c * 255) for c in LINE_RGB), "stage line (--geometry): dark; faint where hidden"))
     if has_needle:
         entries.append((tuple(int(c * 255) for c in NEEDLE_RGB), "the point (needle up from the ground, ring on it)"))
-    entries += list(extra_legend)
-    cols = 3
-    rows = (len(entries) + cols - 1) // cols
-    row_h, tf = 24, _font(18)
-    head = 62
-    canvas = Image.new("RGB", (W, head + H + 12 + rows * row_h + 10), (255, 255, 255))
-    canvas.paste(pic, (0, head))
+    return entries + list(extra_legend)
+
+
+PANEL_GAP = 6       # px between the views of one picture
+
+
+def compose(panels, title, subtitle, entries, cols=2):
+    """Panels (PIL images of one size) in a grid of cols per row, PANEL_GAP apart, a title band (62 px) above and the legend
+    below; a PIL image."""
+    from PIL import Image, ImageDraw
+    cols = max(1, min(cols, len(panels)))
+    pw, ph = panels[0].size
+    prow = (len(panels) + cols - 1) // cols
+    W = cols * pw + (cols - 1) * PANEL_GAP
+    H = prow * ph + (prow - 1) * PANEL_GAP
+    f, tf = _font(15), _font(18)
+    lcols = 3 if W < 1400 else 4
+    lrows = (len(entries) + lcols - 1) // lcols
+    row_h, head = 24, 62
+    canvas = Image.new("RGB", (W, head + H + 12 + lrows * row_h + 10), (255, 255, 255))
+    for k, pic in enumerate(panels):
+        canvas.paste(pic, ((k % cols) * (pw + PANEL_GAP), head + (k // cols) * (ph + PANEL_GAP)))
     cd = ImageDraw.Draw(canvas)
     cd.text((12, 6), title, fill=(0, 0, 0), font=tf)
     cd.text((12, 34), subtitle, fill=(60, 60, 60), font=f)
     for k, (rgb, name) in enumerate(entries):
-        cx_ = 12 + (k % cols) * (W // cols)
-        cy_ = head + H + 12 + (k // cols) * row_h
+        cx_ = 12 + (k % lcols) * (W // lcols)
+        cy_ = head + H + 12 + (k // lcols) * row_h
         cd.rectangle([cx_, cy_ + 2, cx_ + 28, cy_ + 18], fill=rgb, outline=(0, 0, 0))
         cd.text((cx_ + 36, cy_ + 1), name, fill=(0, 0, 0), font=f)
     return canvas
+
+
+def frame_picture(img, cam, title, subtitle, used, has_line, has_needle, extra_legend=(), label=None):
+    """One view framed alone: the map image (H, W, 3 floats) with a title bar above, the scale bar and north arrow on it, the
+    legend below; a PIL image."""
+    return compose([annotate_panel(img, cam, label)], title, subtitle,
+                   legend_entries(used, has_line, has_needle, extra_legend), cols=1)
 
 
 # ======================================================================================================================
@@ -644,7 +679,7 @@ def main():
     where = ap.add_mutually_exclusive_group(required=True)
     where.add_argument("--at", type=parse_pair, help="lat,lon of the point")
     where.add_argument("--xy", type=parse_pair, help="x,y of the point in the anchor frame (m, x east, y north)")
-    ap.add_argument("--radius", type=float, default=120.0, help="m around the point drawn (default 120)")
+    ap.add_argument("--radius", type=float, default=40.0, help="m around the point drawn (default 40: close up; 120 for the place)")
     ap.add_argument("--out", default="earth-view")
     ap.add_argument("--name", default="earth_view", help="the pictures' file name stem")
     ap.add_argument("--geometry", action="append", default=[], help="a EarthRally stage geometry json drawn as a thin dark line; repeatable")
@@ -655,7 +690,9 @@ def main():
     ap.add_argument("--rally-edition", help="the edition's legs.json, for its shaping limits")
     ap.add_argument("--views", default="top,SW,SE,N", help="comma list: top, compass points or bearings (camera side); default top,SW,SE,N")
     ap.add_argument("--elev", type=float, default=35.0, help="the oblique cameras' elevation above the horizon (deg)")
-    ap.add_argument("--image", default="1600x1000", help="the map's pixels, WxH (a title and legend are added around it)")
+    ap.add_argument("--image", default="960x640", help="one view's pixels, WxH (the views are put two per row, a title and "
+                    "legend added around them)")
+    ap.add_argument("--separate", action="store_true", help="also write each view as a picture of its own")
     ap.add_argument("--ss", type=int, default=2, help="supersampling per axis (antialiasing)")
     ap.add_argument("--kinds", default=",".join(DEFAULT_KINDS),
                     help="mesh kinds drawn: " + ", ".join(DEFAULT_KINDS) + "; also wire, signs, bldcol, railcol, walkcol, buscol, ...")
@@ -727,19 +764,24 @@ def main():
     corners = np.array([[box[i], box[j], zz] for i in (0, 2) for j in (1, 3)
                         for zz in (float(tris[:, :, 2].min()), float(tris[:, :, 2].max()))])
     target = np.array([px, py, pz])
-    paths = []
+    panels, used_all = [], set()
     for v in (s for s in a.views.split(",") if s.strip()):
         top = v.strip().lower() == "top"
         cam = view_camera(target, 0.0 if top else parse_bearing(v), 90.0 if top else a.elev, W, H)
         fit_camera(cam, corners)
         img, used = render(tris, cls, cam, lines=lines, needle=(px, py, pz, pz + 0.25 * a.radius), ss=a.ss, bias=a.bias)
-        suffix = "top-down, north up" if top else f"camera on the {v.strip().upper()} side, {a.elev:g} deg above the horizon"
-        pic = frame_picture(img, cam, title, f"{suffix}.  " + sub, used, bool(lines), True)
-        path = os.path.join(a.out, f"{a.name}_{view_name(v)}.png")
-        pic.save(path)
-        paths.append(path)
-        log(f"wrote {path}")
-
+        label = "top-down, north up" if top else f"from {v.strip().upper()}, {a.elev:g} deg above the horizon"
+        panels.append(annotate_panel(img, cam, label))
+        used_all.update(int(u) for u in used)
+        if a.separate:
+            path = os.path.join(a.out, f"{a.name}_{view_name(v)}.png")
+            frame_picture(img, cam, title, sub, used, bool(lines), True, label=label).save(path)
+            log(f"wrote {path}")
+    if not panels:
+        sys.exit("--views names no view")
+    path = os.path.join(a.out, f"{a.name}.png")
+    compose(panels, title, sub, legend_entries(sorted(used_all), bool(lines), True)).save(path)
+    log(f"wrote {path}")
 
 if __name__ == "__main__":
     main()
