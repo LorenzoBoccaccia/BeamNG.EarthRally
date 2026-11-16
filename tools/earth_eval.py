@@ -10,17 +10,21 @@ Each junction is built twice in its own folder (<out>/<name>/before, <out>/<name
 per tree, Earth's plan cache off), then:
 
   <out>/<name>.png      3 x 2: the before views in the top row, the after views under them; by default the overview (1 km
-                        round the point from above, the after one tinted red where the ground rose and blue where it fell
-                        MINOR_M or more), the close-up from above and from the south-west; the verdict in the title
+                        round the point in 3D from the south-west, the after one with the ground that rose red and the ground
+                        that fell blue, ev.CHANGED_M or more), the close-up from above and from the south-west; the verdict
+                        in the title
   <out>/<name>_diff.png the close-up's change seen from straight above: red where the surface rose, blue where it fell, grey
                         where something else is there (a road where the ground was, a deck gone), white where it is the same;
                         and its key with the numbers
-  <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, and how far the
-                        ground, the roads, the decks and the rails moved (max and 99th percentile, m)
+  <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, how far the
+                        ground, the roads, the decks and the rails moved (max and 99th percentile, m), and the geometry
+                        checks' counts before -> after (earth_checks: vehicles hitting a road or rail not their own, crossings
+                        at different levels whose meshes cut each other, in the close-up and in the 1 km overview); a
+                        junction where one grows is "worse" whatever else
   <out>/report.json     the same numbers
 
 A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
-moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did that
+moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did, or got worse, that
 is not in --expect (the junctions the change is about). --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
 """
@@ -47,6 +51,7 @@ PANEL = "520x360"               # one view's pixels in the eval picture
 SIDES = ("before", "after")
 GROUPS = {"ground": (ev.GROUND, ev.MOVED), "road": (ev.ROAD,), "deck": (ev.DECK,), "rail": (ev.RAIL,)}
 UP_RGB, DOWN_RGB, KIND_RGB, SAME_RGB = (0.85, 0.1, 0.1), (0.1, 0.25, 0.9), (0.45, 0.45, 0.45), (1.0, 1.0, 1.0)
+LIDAR_WAIT_S = "900"            # s each side may wait for a place's lidar (build_side)
 DIFF_FULL_M = 2.0               # m of rise or fall drawn at the full colour
 
 
@@ -79,12 +84,17 @@ def build_side(j, side, tree, a, log):
     os.makedirs(out, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "earth_view.py"), "--earth", tree, "--out", out, "--name", "view", "--dump",
            "--label-prefix", f"{side}: ", "--image", a.image, "--views", a.views] + junction_args(j)
+    if side == "after":         # (the overview marks the ground that moved since before)
+        cmd += ["--compare-data", os.path.join(a.out, j["name"], "before", "data")]
     for flag in ("reuse", "online", "no_buildings"):
         if getattr(a, flag):
             cmd.append("--" + flag.replace("_", "-"))
     if a.cache:
         cmd += ["--cache", a.cache]
-    env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off")
+    # (both sides built under the same conditions: Earth plans a place without its lidar when the lidar's read takes
+    # longer than BNE_LIDAR_GAPS_WAIT (8 s), and the first side to build a cold place fetched it while the second found it
+    # cached: Boston's Bowker "fell" 4-6 m between two identical trees. The wait pre-cache uses, so neither side gives up)
+    env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off", BNE_LIDAR_GAPS_WAIT=LIDAR_WAIT_S)
     t = time.time()
     with open(os.path.join(out, "view.log"), "w", encoding="utf-8") as f:
         r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
@@ -168,42 +178,15 @@ def key_panel(W, H, res):
         if r["n"]:
             d.text((10, y), f"{g}: moved up to {r['max']:.2f} m (99 %: {r['p99']:.2f} m)", fill=(0, 0, 0), font=f)
             y += 22
-    return pic
-
-
-def load_overview(path):
-    """(map (H, W, 3 uint8), heights (H, W), scale px/m, label) of earth_view's <name>_overview.npz, or None."""
-    if not os.path.isfile(path):
-        return None
-    with np.load(path, allow_pickle=False) as f:
-        return f["img"], f["z"].astype(np.float64), float(f["scale"]), str(f["label"])
-
-
-def overview_change(img, zb, za, minor_m=MINOR_M):
-    """The after overview's map (H, W, 3 uint8) tinted where its ground rose (red) or fell (blue) minor_m or more since before."""
-    dz = np.where(np.isfinite(za) & np.isfinite(zb), za - zb, 0.0)
-    out = img.astype(np.float64) / 255.0
-    for mask, rgb in ((dz >= minor_m, UP_RGB), (dz <= -minor_m, DOWN_RGB)):
-        out[mask] = 0.35 * out[mask] + 0.65 * np.asarray(rgb)
-    return out
-
-
-def overview_panels(j, a, W, H):
-    """{side: the overview panel (PIL)}: each side's overview, the after one with the ground that moved tinted."""
-    got = {side: load_overview(os.path.join(a.out, j["name"], side, "view_overview.npz")) for side in SIDES}
-    out = {}
-    for side in SIDES:
-        o = got[side]
-        if o is None:
+    y += 8
+    for k, name in CHECKS:
+        b, a_ = res.get("checks", {}).get(k, [None, None])
+        if b is None and a_ is None:
             continue
-        img, z, scale, label = o
-        f = img.astype(np.float64) / 255.0
-        if side == "after" and got["before"] is not None and got["before"][1].shape == z.shape:
-            f = overview_change(img, got["before"][1], z)
-            label = f"after: overview 1 x 1 km; red: ground rose, blue: fell {MINOR_M:g} m+"
-        cam = ev.view_camera(np.zeros(3), 0.0, 90.0, img.shape[1], img.shape[0], scale)
-        out[side] = ev.annotate_panel(f, cam, label)
-    return out
+        bad = k in res.get("worse", [])
+        d.text((10, y), f"{name}: {b} before, {a_} after", fill=(200, 0, 0) if bad else (0, 0, 0), font=f)
+        y += 22
+    return pic
 
 
 def verdict_line(res):
@@ -211,8 +194,12 @@ def verdict_line(res):
     if res.get("error"):
         return "error: " + res["error"]
     parts = [f"{g} up to {res[g]['max']:.2f} m" for g in GROUPS if res[g]["n"] and res[g]["max"] > SAME_M]
-    return ({"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
-            f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else ""))
+    ck = res.get("checks", {})
+    short = {"vehicles_hit": "vehicles hitting", "crossings_cut": "crossings cutting", "overview_crossings_cut": "in 1 km"}
+    hits = ", ".join(f"{short[k]} {b} -> {a}" for k, (b, a) in ck.items() if b is not None or a is not None)
+    return (("WORSE, " if res.get("worse") else "") + {"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
+            f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else "") +
+            (f"; checks {hits}" if hits else ""))
 
 
 def eval_picture(j, a, res, log):
@@ -221,23 +208,17 @@ def eval_picture(j, a, res, log):
     from PIL import Image
     W, H = (int(v) for v in a.image.lower().split("x"))
     views = [v.strip() for v in a.views.split(",") if v.strip()]
-    ovs = overview_panels(j, a, W, H) if any(ev.is_overview(v) for v in views) else {}
     grey = lambda: Image.new("RGB", (W, H), (230, 230, 230))    # noqa: E731
     panels = []
     for side in SIDES:
         for v in views:
-            if ev.is_overview(v):
-                panels.append(ovs.get(side) or grey())
-                continue
             p = os.path.join(a.out, j["name"], side, f"view_panel_{ev.view_name(v)}.png")
             panels.append(Image.open(p).convert("RGB") if os.path.isfile(p) else grey())
     sub = verdict_line(res) + f"      before: {os.path.basename(a.before)}   after: {os.path.basename(a.after)}"
     title = f"{j['name']}: {j.get('what', '')}"
     used = res.get("_used", [ev.GROUND, ev.ROAD])
-    extra = (ev.overview_legend() + [(tuple(int(c * 255) for c in UP_RGB), f"after overview: the ground rose {MINOR_M:g} m or more"),
-                                     (tuple(int(c * 255) for c in DOWN_RGB), f"after overview: the ground fell {MINOR_M:g} m or more")]
-             if ovs else [])
-    pic = ev.compose(panels, title, sub, ev.legend_entries(used, bool(j.get("geometry")), True, extra), cols=len(views))
+    has_line = bool(j.get("geometry")) or any(ev.is_overview(v) for v in views)
+    pic = ev.compose(panels, title, sub, ev.legend_entries(used, has_line, True), cols=len(views))
     path = os.path.join(a.out, f"{j['name']}.png")
     pic.save(path)
     log(f"  wrote {path}")
@@ -246,6 +227,27 @@ def eval_picture(j, a, res, log):
     ev.compose(diff, title + ": the close-up's change", f"before: {a.before}   after: {a.after}", [], cols=2).save(dpath)
     log(f"  wrote {dpath}")
     return path
+
+
+CHECKS = (("vehicles_hit", "vehicles hitting a road or rail not their own"),
+          ("crossings_cut", "crossings at different levels with meshes cutting each other"),
+          ("overview_crossings_cut", "the same in the 1 km overview"))
+
+
+def load_checks(path):
+    """earth_view's <name>_checks.json (earth_checks' counts), {} without one."""
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def compare_checks(before, after):
+    """{"checks": {key: [before, after]}, "worse": [keys that grew]}: the geometry checks' counts, before and after; a count
+    one side lacks is None and never worse."""
+    out = {k: [before.get(k), after.get(k)] for k, _n in CHECKS}
+    worse = [k for k, (b, a) in out.items() if b is not None and a is not None and a > b]
+    return {"checks": out, "worse": worse}
 
 
 def load_surface(path):
@@ -269,23 +271,48 @@ def run_junction(j, a, log):
             W, H = (int(v) for v in a.image.lower().split("x"))
             res["_diff"] = diff_image(sb, sa, W, H)
             res["_used"] = sorted(set(ub) | set(ua))
+    res.update(compare_checks(*(load_checks(os.path.join(a.out, j["name"], side, "view_checks.json")) for side in SIDES)))
     res["picture"] = eval_picture(j, a, res, log)
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
 
+def flagged_junctions(results):
+    """[(name, [(what, count)])] of the junctions whose after side has a vehicle hitting (yellow) or meshes cutting (red), most
+    first: the pictures to look at; the others need no look unless they changed."""
+    out = []
+    for r in results:
+        what = [(name, (r.get("checks", {}).get(k) or [None, None])[1]) for k, name in
+                (("vehicles_hit", "yellow"), ("crossings_cut", "red"), ("overview_crossings_cut", "red in 1 km"))]
+        what = [(n, v) for n, v in what if v]
+        if what:
+            out.append((r["name"], what))
+    return sorted(out, key=lambda t: -sum(v for _n, v in t[1]))
+
+
 def write_report(results, a):
-    rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max |",
-            "|---|---|---|---|---|---|---|"]
+    rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max | vehicles hitting "
+            "| crossings cutting | cutting in 1 km |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         if r.get("error"):
-            rows.append(f"| {r['name']} | error: {r['error']} | | | | | |")
+            rows.append(f"| {r['name']} | error: {r['error']} | | | | | | | | |")
             continue
         g = r["ground"]
-        rows.append(f"| {r['name']} | {'**changed**' if r['changed'] else r['verdict']} | {100 * r['kind_changed']:.2f} % | "
+        ck = r.get("checks", {})
+        cells = []
+        for k, _n in CHECKS:
+            b, a_ = ck.get(k, [None, None])
+            c = "-" if b is None and a_ is None else f"{b} → {a_}"
+            cells.append(f"**{c}**" if k in r.get("worse", []) else c)
+        result = ("**worse**, " if r.get("worse") else "") + ("**changed**" if r["changed"] else r["verdict"])
+        rows.append(f"| {r['name']} | {result} | {100 * r['kind_changed']:.2f} % | "
                     f"{g['max']:.2f} / {g['p99']:.2f} | " + " | ".join(
-                        f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " |")
+                        f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " | " + " | ".join(cells) + " |")
+    flagged = flagged_junctions(results)
+    look = (["## Look at these: yellow or red after the change", ""] +
+            [f"- **{n}** (`{n}.png`): " + ", ".join(f"{name} {v}" for name, v in what) for n, what in flagged] +
+            [""] if flagged else ["No junction has yellow or red after the change.", ""])
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
-          *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
+          *look, *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     with open(os.path.join(a.out, "report.json"), "w", encoding="utf-8") as f:
@@ -332,7 +359,7 @@ def main(argv=None):
     results = [run_junction(j, a, log) for j in junctions]
     log(write_report(results, a))
     expect = {s.strip() for s in a.expect.split(",") if s.strip()}
-    bad = [r["name"] for r in results if r.get("changed") and r["name"] not in expect]
+    bad = [r["name"] for r in results if (r.get("changed") or r.get("worse")) and r["name"] not in expect]
     if a.fail_on_change and bad:
         log(f"changed and not expected: {', '.join(bad)}")
         return 1
