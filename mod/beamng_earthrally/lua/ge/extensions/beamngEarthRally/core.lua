@@ -633,12 +633,24 @@ end
 -- them near the player), else a ray down onto static collision (the top surface: a roof where a building stands), else
 -- nil (the ground is not loaded there yet). hint is the terrain data's height, which the game's ground is within a few
 -- metres of (measured 3.3 m at the testbed start); a value more than HINT_MAX_M from it is not believed (an empty block answers 0).
+-- ref, when given, is the height of the road there (the car's own, on it): a terrain height more than ROAD_UNDER_M over it is
+-- the hill over a tunnel (the Fuji Subaru Line's snow shed, 2026-11-16: "ground 2283.4 (car -5.6)"), and the road is the first static
+-- surface a short ray finds down from RAY_UP_M over ref (under a tube's roof).
 local HINT_MAX_M = 25
-local function groundAt(x, y, hint)
+local ROAD_UNDER_M, RAY_UP_M, RAY_DOWN_M = 2.5, 1.5, 4
+local function groundAt(x, y, hint, ref)
   local ct = rawget(_G, 'core_terrain')
   if ct and ct.getTerrainHeight and vec3 then
     local ok, h = pcall(ct.getTerrainHeight, vec3(x, y, hint or 0))
-    if ok and type(h) == 'number' and h == h and (not hint or math.abs(h - hint) <= HINT_MAX_M) and h > -1000 then return h end
+    if ok and type(h) == 'number' and h == h and (not hint or math.abs(h - hint) <= HINT_MAX_M) and h > -1000 then
+      if not (ref and h > ref + ROAD_UNDER_M) then return h end
+      if castRayStatic then
+        local top = ref + RAY_UP_M
+        local hit = castRayStatic(vec3(x, y, top), vec3(0, 0, -1), RAY_UP_M + RAY_DOWN_M)
+        if hit and hit < RAY_UP_M + RAY_DOWN_M then return top - hit end
+      end
+      return ref
+    end
   end
   if castRayStatic and vec3 then
     local top = (hint or 0) + 200
@@ -717,18 +729,22 @@ local GUIDE_MATCH_M = 40          -- the game's route ends this close to a liais
 -- A function (x, y) -> is a navgraph node within guide.ON_GRAPH_M? Built once per check from the nodes as they are then.
 local function guideOnGraph()
   local nodes = navNodes()
-  local xs, ys, n = {}, {}, 0
+  local xs, ys, zs, n = {}, {}, {}, 0
   for _, nd in pairs(nodes or {}) do
     local p = nd.pos
-    if p then n = n + 1; xs[n], ys[n] = p.x or p[1], p.y or p[2] end
+    if p then n = n + 1; xs[n], ys[n], zs[n] = p.x or p[1], p.y or p[2], p.z or p[3] end
   end
   local r2 = guide.ON_GRAPH_M * guide.ON_GRAPH_M
+  -- (and the nearest node: the target goes on it, at the graph's own height, guideSet)
   return function(x, y)
+    local best, bd
     for i = 1, n do
       local dx, dy = xs[i] - x, ys[i] - y
-      if dx * dx + dy * dy <= r2 then return true end
+      local d = dx * dx + dy * dy
+      if d <= r2 and (not bd or d < bd) then best, bd = i, d end
     end
-    return false
+    if not best then return false end
+    return true, { xs[best], ys[best], zs[best] }
   end
 end
 
@@ -745,10 +761,17 @@ end
 -- Set the arrows' path for the car where it is: g.cur is the target in force.
 local function guideSet(g, gm, p, tgt, off)
   local x, y, z = tgt.x, tgt.y, tgt.z
+  local nd = not tgt.final and tgt.node
   if tgt.final then x, y, z = guide.pointAt(g.line, g.line.total - guide.FINAL_BEFORE_M) end
-  -- (the target on the game's ground: the line's heights are an old coarse terrain's, up to 10 m over a road in a cutting
-  -- the line knows nothing of, and the planner's last leg runs straight up to the target: the arrows climbed off the road)
-  z = groundAt(x, y, z) or z or p[3]
+  if nd and nd[3] then
+    -- (on the graph, the target is its node, at Earth's road height: a tunnel's floor, a deck's top; the terrain block is the
+    -- hill over a tunnel, the arrows climbed to the tube's roof on the Fuji Subaru Line's snow shed, 2026-11-16)
+    x, y, z = nd[1], nd[2], nd[3]
+  else
+    -- (else the game's ground: the line's heights are an old coarse terrain's, up to 10 m over a road in a cutting
+    -- the line knows nothing of, and the planner's last leg runs straight up to the target: the arrows climbed off the road)
+    z = groundAt(x, y, z) or z or p[3]
+  end
   local list = { vec3(x, y, z) }
   local options = {}
   for k, v in pairs(guide.PLANNER) do options[k] = v end
@@ -1664,7 +1687,7 @@ local function hudTick()
   local p = veh:getPosition()
   local v = veh.getVelocity and veh:getVelocity()
   local lat, lon = earthapi.position()
-  local s = { x = p.x, y = p.y, z = p.z, lat = lat, lon = lon, ground = groundAt(p.x, p.y, p.z),
+  local s = { x = p.x, y = p.y, z = p.z, lat = lat, lon = lon, ground = groundAt(p.x, p.y, p.z, p.z),
     speed = v and v:length() or 0, line = hud.nearest(hudLines(), p.x, p.y) }
   st.hudText = hud.text(s)
   ownLog('I', hud.logLine(s))
