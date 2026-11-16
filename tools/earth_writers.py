@@ -16,19 +16,24 @@ leaves as it was given goes back to its writer from before the call (an array of
 inside is not a write). A source (no heights given) only claims samples that have no writer yet.
 
 The colour of a sample is PALETTE[crc32(stack) % 256], the stack being the Earth frames of the call, innermost first
-(file:function:line). Writes outside Earth's files are not seen (the game's runtime shaping, EarthRally's, is not in it).
+(file:function:line). Writes outside Earth's files are not seen by the tracing: the game's runtime shaping, EarthRally's ground grader,
+is run on the built block afterwards with --rally (rally_grader.py: the mod's own shape.lua on the stages of --geometry, as the game
+would, without the game's colliders), and every sample it moves is drawn over Earth's writers in RALLY_RGB (magenta), the points of
+the line it keeps as Earth made them (beside a tunnel) as cyan dots and the bridge or tunnel spans it skips as yellow ones.
 
   writers.png      the block (and --box zoomed), coloured by writer, the tunnels' holes of the .ter in black
   writers.txt      every writer: colour index, samples (block, box), its stack; the check of the build against the
                    session's PNG and of the writers' last values against the heights the block was built from
+  rally_profile.png  (--rally) along each stage line in the box: Earth's ground and the ground after the grader, the stretches it
+                   keeps (beside a tunnel) and skips (a span) shaded
   undone.png       the samples where a call gave back the value it was given after a call inside it had written there
                    (a put-back), coloured by the call that gave it back
   writers.npz      label (int, index into writers.txt's list; -1 none), stacks (label -> its stack), undone_by /
-                   undone_what, the heights, the holes
+                   undone_what, the heights, the holes, rally (--rally: the grader's change of each sample, m)
 
   python tools/earth_writers.py --earth ../BeamNG.Earth-1.9.1 --anchor 42.17,13.82 --block 640,896 \
       --box 470,780,680,960 --session <game user folder>/temp/beamngEarth/<session> \
-      --geometry editions/svolte-di-popoli/geometry/ss1.json --out writers-out
+      --geometry editions/svolte-di-popoli/geometry/ss1.json --rally --out writers-out
 """
 import argparse
 import colorsys
@@ -53,6 +58,8 @@ SKIP_MODULES = {"geodesy", "geotiles", "mapcells", "mercator", "runtimeprofiler"
 EXACT_ENU = 1e-6        # m: a sample's x / y in the anchor frame (the lattice itself)
 EXACT_GEO = 1e-4        # m: through latitude / longitude and back
 EXACT_REGION = 1e-3     # m: through a planning region's frame
+RALLY_RGB = (1.0, 0.0, 1.0)     # the samples EarthRally's grader moves (--rally)
+RALLY_MIN_M = 0.02              # ... by this much at least (shape.MIN_CHANGE_M)
 
 
 def palette(n=256):
@@ -316,6 +323,22 @@ def instrument(server_dir, done):
     return now
 
 
+def log_quantum(log_path, aid):
+    """The last height quantum the server log gives anchor aid ("anchor 2 height quantum 1/64 m"), or None."""
+    import re
+    pat = re.compile(rf"anchor {int(aid)} height quantum 1/(\d+) m")
+    got = None
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = pat.search(line)
+                if m:
+                    got = 1.0 / int(m.group(1))
+    except OSError:
+        pass
+    return got
+
+
 def main():
     global TRACK
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -325,12 +348,17 @@ def main():
     ap.add_argument("--aid", type=int, default=4)
     ap.add_argument("--block", required=True, type=earth_trace.parse_pair)
     ap.add_argument("--size", type=int, default=1024, help="the block's samples per edge (the server's layout)")
-    ap.add_argument("--q", type=float, default=1 / 32, help="the anchor's height quantum (the log's 'height quantum')")
+    ap.add_argument("--q", type=float, help="the anchor's height quantum (default: the server log's 'anchor <aid> height quantum', "
+                                            "else 1/32)")
     ap.add_argument("--box", help="x0,y0,x1,y1 drawn zoomed (anchor frame, m)")
     ap.add_argument("--session", help="the game's session folder, to check the build against its PNG")
     ap.add_argument("--server-log", default=os.path.join(os.environ.get("LOCALAPPDATA", ""), "beamng-earth", "logs",
                                                          "server.log"))
-    ap.add_argument("--geometry", help="a EarthRally stage geometry json drawn over the maps (thin white line)")
+    ap.add_argument("--geometry", action="append", default=[],
+                    help="a EarthRally stage geometry json drawn over the maps (thin white line); repeatable")
+    ap.add_argument("--rally", action="store_true",
+                    help="run EarthRally's ground grader (shape.lua) on the built block along the --geometry stages and colour what it moves")
+    ap.add_argument("--rally-edition", help="the edition's legs.json, for its shaping limits (shaping: spikeM)")
     ap.add_argument("--no-airports", action="store_true")
     ap.add_argument("--no-sea", action="store_true")
     ap.add_argument("--online", action="store_true")
@@ -339,6 +367,11 @@ def main():
     if not a.earth:
         sys.exit("--earth (or BEAMNG_EARTH_DIR) is needed")
     earth_trace.AID = a.aid
+    if a.q is None:
+        a.q = log_quantum(a.server_log, a.aid) or 1 / 32
+        print(f"height quantum {a.q:g} m", flush=True)
+    # (a block from Earth's disk cache of graded blocks is read, not built: nothing would be traced)
+    os.environ["BNGE_BLOCKCACHE"] = "off"
     earth_trace.load_earth(a.earth)
     server_dir = os.path.join(os.path.abspath(a.earth), "server")
     import blockworker
@@ -436,6 +469,10 @@ def main():
                           f"{y0b + jj.max():g}; by writer: " + ", ".join(
                               f"[{k}] {int(v)}" for k, v in zip(*np.unique(TRACK.label.reshape(a.size, a.size)[d],
                                                                             return_counts=True))))
+    rally = None
+    if a.rally:
+        rally = rally_pass(a, frame, cx, cy, zfin, built, info)
+        checks += rally["report"]
     holes = None
     terp = os.path.join(a.out, ter)
     if os.path.isfile(terp):
@@ -494,14 +531,111 @@ def main():
                         undone_what=TRACK.undone_what.reshape(a.size, a.size),
                         stacks=np.array(["|".join(st) for st in TRACK.stacks]),
                         hash=np.array([zlib.crc32("|".join(st).encode()) % 256 for st in TRACK.stacks], np.int32),
-                        z=zfin.reshape(a.size, a.size), holes=holes if holes is not None else np.zeros(0))
-    draw(a, lab, xs, ys, box, rows, holes, frame)
+                        z=zfin.reshape(a.size, a.size), holes=holes if holes is not None else np.zeros(0),
+                        rally=rally["change"] if rally else np.zeros(0))
+    draw(a, lab, xs, ys, box, rows, holes, frame, rally=rally)
+    if rally:
+        draw_profiles(a, rally, box, xs, ys)
     draw(a, und, xs, ys, box, [(sid, zlib.crc32("|".join(TRACK.stacks[sid]).encode()) % 256, 1, 1, TRACK.stacks[sid])
                                for sid in np.unique(und[und >= 0])], holes, frame, "undone.png",
          "the call that gave back a value written inside it")
 
 
-def draw(a, lab, xs, ys, box, rows, holes, frame, fname="writers.png", what="last writer of each height sample"):
+def rally_pass(a, frame, cx, cy, zfin, built, info):
+    """EarthRally's grader on the block as built (rally_grader.py): its change of each sample, the lines as it saw them, the report."""
+    import rally_grader
+    n = a.size
+    z = zfin.reshape(n, n).copy()
+    if not np.isfinite(z).all():           # (a sample the trace has no height for: the built PNG's, the quantum and the base)
+        zq = built * a.q + float(info.get("zBase") or 0.0)
+        z[~np.isfinite(z)] = zq[~np.isfinite(z)]
+    x0, y0 = cx - n / 2.0, cy - n / 2.0
+    geoms = rally_grader.load_geometries(a.geometry)
+    shaping = None
+    if a.rally_edition:
+        with open(a.rally_edition, encoding="utf-8") as f:
+            shaping = json.load(f).get("shaping")
+    tunnels = rally_grader.tunnel_points(frame, (x0, y0, x0 + n, y0 + n))
+    print(f"rally grader: {len(geoms)} stage lines, {len(tunnels)} tunnel points, running shape.lua ...", flush=True)
+    res = rally_grader.run(z, x0, y0, frame, geoms, tunnels, shaping)
+    change = res["heights"] - z
+    moved = np.abs(change) >= RALLY_MIN_M
+    rep = ["", f"EarthRally's grader (shape.lua, --rally; no colliders offline: deck ends and overpasses the game's rays find are not shaped "
+           f"here): {int(moved.sum())} samples moved {RALLY_MIN_M:g} m or more, largest {np.abs(change).max():.2f} m, "
+           f"{len(tunnels)} tunnel points, {res['frames']} frames"]
+    for ln in res["lines"]:
+        kept = np.asarray(ln["kept"])
+        sk = np.asarray([v is not None for v in ln["skip"]])
+        s = np.asarray(ln["s"] or np.zeros(len(kept)))
+
+        def ranges(mask):
+            out, i = [], 0
+            while i < len(mask):
+                if mask[i]:
+                    j = i
+                    while j + 1 < len(mask) and mask[j + 1]:
+                        j += 1
+                    out.append(f"{s[i]:.0f}-{s[j]:.0f} m")
+                    i = j + 1
+                else:
+                    i += 1
+            return ", ".join(out) or "none"
+        rep.append(f"  {ln['leg']}: kept as Earth made it (beside a tunnel) {ranges(kept)}; skipped (a span) {ranges(sk)}")
+    rep += ["  the grader's log:"] + [f"    {m}" for m in res["logs"]]
+    return {"change": change, "moved": moved, "before": z, "after": res["heights"], "lines": res["lines"], "report": rep,
+            "x0": x0, "y0": y0}
+
+
+def draw_profiles(a, rally, box, xs, ys):
+    """Along each stage line within the box (or the block): Earth's ground and the ground after the grader, kept and skipped stretches shaded."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    n = rally["before"].shape[0]
+
+    def at(u, x, y):
+        fx, fy = x - rally["x0"], y - rally["y0"]
+        i, j = np.floor(fx).astype(int), np.floor(fy).astype(int)
+        ok = (i >= 0) & (j >= 0) & (i + 1 < n) & (j + 1 < n)
+        i, j = np.clip(i, 0, n - 2), np.clip(j, 0, n - 2)
+        p, q = fx - i, fy - j
+        v = u[j, i] * (1 - p) * (1 - q) + u[j, i + 1] * p * (1 - q) + u[j + 1, i] * (1 - p) * q + u[j + 1, i + 1] * p * q
+        return np.where(ok, v, np.nan)
+    bx = (xs[box[1]][0], xs[box[1]][-1], ys[box[0]][0], ys[box[0]][-1]) if box else (xs[0], xs[-1], ys[0], ys[-1])
+    lines = []
+    for ln in rally["lines"]:
+        x, y = np.asarray(ln["x"]), np.asarray(ln["y"])
+        s = np.asarray(ln["s"]) if ln["s"] else np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+        inside = (x >= bx[0]) & (x <= bx[1]) & (y >= bx[2]) & (y <= bx[3])
+        if inside.any():
+            lines.append((ln, x, y, s, inside))
+    if not lines:
+        return
+    fig, axs = plt.subplots(len(lines), 1, figsize=(14, 4.5 * len(lines)), squeeze=False)
+    for ax, (ln, x, y, s, inside) in zip(axs[:, 0], lines):
+        idx = np.nonzero(inside)[0]
+        i0, i1 = max(0, idx[0] - 3), min(len(s) - 1, idx[-1] + 3)
+        ss = np.arange(s[i0], s[i1], 1.0)
+        px, py = np.interp(ss, s, x), np.interp(ss, s, y)
+        ax.plot(ss, at(rally["before"], px, py), color="0.4", lw=1.2, label="Earth's ground on the line")
+        ax.plot(ss, at(rally["after"], px, py), color="m", lw=1.2, label="after EarthRally's grader")
+        for q in range(i0, i1):
+            if ln["kept"][q]:
+                ax.axvspan(s[q], s[q + 1], color="c", alpha=0.15, lw=0)
+            if ln["skip"][q] is not None:
+                ax.axvspan(s[q], s[q + 1], color="y", alpha=0.25, lw=0)
+        ax.set_title(f"{ln['leg']}: the ground along the line; cyan: kept as Earth made it (beside a tunnel); yellow: a span skipped",
+                     fontsize=10)
+        ax.set_xlabel("m along the line")
+        ax.set_ylabel("height (anchor frame, m)")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(a.out, "rally_profile.png"), dpi=80)
+    plt.close(fig)
+
+
+def draw(a, lab, xs, ys, box, rows, holes, frame, fname="writers.png", what="last writer of each height sample", rally=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -512,23 +646,33 @@ def draw(a, lab, xs, ys, box, rows, holes, frame, fname="writers.png", what="las
         rgb[lab == sid] = PALETTE[h]
     if holes is not None:
         rgb[holes] = 0.0
-    stage = None
-    if a.geometry:
-        with open(a.geometry, encoding="utf-8") as f:
+    if rally is not None:
+        rgb[rally["moved"]] = RALLY_RGB
+    stages = []
+    for gp in a.geometry:
+        with open(gp, encoding="utf-8") as f:
             pts = np.asarray(json.load(f)["points"], np.float64)
         e, n, _ = frame.geodetic_to_enu(pts[:, 0], pts[:, 1], 0.0)
-        stage = (np.asarray(e), np.asarray(n))
+        stages.append((np.asarray(e), np.asarray(n)))
     views = [("block", (slice(None), slice(None)))] + ([("box", box)] if box else [])
     fig, axs = plt.subplots(1, len(views), figsize=(11 * len(views), 11), squeeze=False)
     for ax, (title, sl) in zip(axs[0], views):
         sx, sy = xs[sl[1]], ys[sl[0]]
         ax.imshow(rgb[sl], origin="lower", extent=(sx[0] - 0.5, sx[-1] + 0.5, sy[0] - 0.5, sy[-1] + 0.5),
                   interpolation="nearest")
-        if stage is not None:
-            ax.plot(stage[0], stage[1], color="white", lw=0.6)
+        for st in stages:
+            ax.plot(st[0], st[1], color="white", lw=0.6)
+        if rally is not None:
+            for ln in rally["lines"]:
+                k = np.asarray(ln["kept"])
+                sk = np.asarray([v is not None for v in ln["skip"]])
+                ax.plot(ln["x"][k], ln["y"][k], "o", color="c", ms=2.5)
+                ax.plot(ln["x"][sk], ln["y"][sk], "o", color="y", ms=2.5)
+        if stages:
             ax.set_xlim(sx[0] - 0.5, sx[-1] + 0.5)
             ax.set_ylim(sy[0] - 0.5, sy[-1] + 0.5)
-        ax.set_title(f"{what} ({title}); black: tunnel holes; white: stage line", fontsize=10)
+        extra = "; magenta: moved by EarthRally's grader; cyan dots: kept as Earth made it; yellow: a span" if rally is not None else ""
+        ax.set_title(f"{what} ({title}); black: tunnel holes; white: stage line{extra}", fontsize=10)
     top = [r for r in rows if (r[3] if box else r[2])][:24]
     handles = [Patch(color=PALETTE[h], label=f"[{sid}] {h}: {st[0]} < {st[1] if len(st) > 1 else ''}"[:110])
                for sid, h, _nb, _nbox, st in top]
