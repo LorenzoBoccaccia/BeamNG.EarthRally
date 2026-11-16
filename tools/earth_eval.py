@@ -16,12 +16,15 @@ per tree, Earth's plan cache off), then:
   <out>/<name>_diff.png the close-up's change seen from straight above: red where the surface rose, blue where it fell, grey
                         where something else is there (a road where the ground was, a deck gone), white where it is the same;
                         and its key with the numbers
-  <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, and how far the
-                        ground, the roads, the decks and the rails moved (max and 99th percentile, m)
+  <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, how far the
+                        ground, the roads, the decks and the rails moved (max and 99th percentile, m), and the geometry
+                        checks' counts before -> after (earth_checks: vehicles hitting a road or rail not their own, crossings
+                        at different levels whose meshes cut each other, in the close-up and in the 1 km overview); a
+                        junction where one grows is "worse" whatever else
   <out>/report.json     the same numbers
 
 A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
-moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did that
+moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did, or got worse, that
 is not in --expect (the junctions the change is about). --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
 """
@@ -171,6 +174,14 @@ def key_panel(W, H, res):
         if r["n"]:
             d.text((10, y), f"{g}: moved up to {r['max']:.2f} m (99 %: {r['p99']:.2f} m)", fill=(0, 0, 0), font=f)
             y += 22
+    y += 8
+    for k, name in CHECKS:
+        b, a_ = res.get("checks", {}).get(k, [None, None])
+        if b is None and a_ is None:
+            continue
+        bad = k in res.get("worse", [])
+        d.text((10, y), f"{name}: {b} before, {a_} after", fill=(200, 0, 0) if bad else (0, 0, 0), font=f)
+        y += 22
     return pic
 
 
@@ -179,8 +190,12 @@ def verdict_line(res):
     if res.get("error"):
         return "error: " + res["error"]
     parts = [f"{g} up to {res[g]['max']:.2f} m" for g in GROUPS if res[g]["n"] and res[g]["max"] > SAME_M]
-    return ({"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
-            f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else ""))
+    ck = res.get("checks", {})
+    short = {"vehicles_hit": "vehicles hitting", "crossings_cut": "crossings cutting", "overview_crossings_cut": "in 1 km"}
+    hits = ", ".join(f"{short[k]} {b} -> {a}" for k, (b, a) in ck.items() if b is not None or a is not None)
+    return (("WORSE, " if res.get("worse") else "") + {"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
+            f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else "") +
+            (f"; checks {hits}" if hits else ""))
 
 
 def eval_picture(j, a, res, log):
@@ -210,6 +225,27 @@ def eval_picture(j, a, res, log):
     return path
 
 
+CHECKS = (("vehicles_hit", "vehicles hitting a road or rail not their own"),
+          ("crossings_cut", "crossings at different levels with meshes cutting each other"),
+          ("overview_crossings_cut", "the same in the 1 km overview"))
+
+
+def load_checks(path):
+    """earth_view's <name>_checks.json (earth_checks' counts), {} without one."""
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def compare_checks(before, after):
+    """{"checks": {key: [before, after]}, "worse": [keys that grew]}: the geometry checks' counts, before and after; a count
+    one side lacks is None and never worse."""
+    out = {k: [before.get(k), after.get(k)] for k, _n in CHECKS}
+    worse = [k for k, (b, a) in out.items() if b is not None and a is not None and a > b]
+    return {"checks": out, "worse": worse}
+
+
 def load_surface(path):
     with np.load(path, allow_pickle=False) as f:
         return (f["cls"], f["z"]), [int(u) for u in f["used"]]
@@ -231,31 +267,29 @@ def run_junction(j, a, log):
             W, H = (int(v) for v in a.image.lower().split("x"))
             res["_diff"] = diff_image(sb, sa, W, H)
             res["_used"] = sorted(set(ub) | set(ua))
-    used = set(res.get("_used", []))
-    for side in SIDES:          # (the overview's classes too: the surface grid's are the close-up's)
-        lp = os.path.join(a.out, j["name"], side, "view.log")
-        if os.path.isfile(lp):
-            with open(lp, encoding="utf-8", errors="replace") as f:
-                t = f.read()
-            if "of rising ground" in t:
-                used |= {ev.ROSE, ev.FELL}
-    if "_used" in res:
-        res["_used"] = sorted(used)
+    res.update(compare_checks(*(load_checks(os.path.join(a.out, j["name"], side, "view_checks.json")) for side in SIDES)))
     res["picture"] = eval_picture(j, a, res, log)
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
 
 def write_report(results, a):
-    rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max |",
-            "|---|---|---|---|---|---|---|"]
+    rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max | vehicles hitting "
+            "| crossings cutting | cutting in 1 km |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         if r.get("error"):
-            rows.append(f"| {r['name']} | error: {r['error']} | | | | | |")
+            rows.append(f"| {r['name']} | error: {r['error']} | | | | | | | | |")
             continue
         g = r["ground"]
-        rows.append(f"| {r['name']} | {'**changed**' if r['changed'] else r['verdict']} | {100 * r['kind_changed']:.2f} % | "
+        ck = r.get("checks", {})
+        cells = []
+        for k, _n in CHECKS:
+            b, a_ = ck.get(k, [None, None])
+            c = "-" if b is None and a_ is None else f"{b} → {a_}"
+            cells.append(f"**{c}**" if k in r.get("worse", []) else c)
+        result = ("**worse**, " if r.get("worse") else "") + ("**changed**" if r["changed"] else r["verdict"])
+        rows.append(f"| {r['name']} | {result} | {100 * r['kind_changed']:.2f} % | "
                     f"{g['max']:.2f} / {g['p99']:.2f} | " + " | ".join(
-                        f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " |")
+                        f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " | " + " | ".join(cells) + " |")
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
           *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
@@ -304,7 +338,7 @@ def main(argv=None):
     results = [run_junction(j, a, log) for j in junctions]
     log(write_report(results, a))
     expect = {s.strip() for s in a.expect.split(",") if s.strip()}
-    bad = [r["name"] for r in results if r.get("changed") and r["name"] not in expect]
+    bad = [r["name"] for r in results if (r.get("changed") or r.get("worse")) and r["name"] not in expect]
     if a.fail_on_change and bad:
         log(f"changed and not expected: {', '.join(bad)}")
         return 1

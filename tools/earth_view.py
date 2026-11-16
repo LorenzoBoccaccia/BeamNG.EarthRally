@@ -9,7 +9,7 @@ one directional (Lambert) light and a little ambient light, in flat colours:
   brown       the ground (the block's 1 m height lattice, cropped to the radius; the .ter's tunnel holes are left open)
   magenta     ground the EarthRally grader moves (--rally; the picture then shows the graded ground)
   pink        roads (the tile's road mesh); a deeper pink: bridge decks (its deck mesh)
-  yellow      railways (rail mesh: ballast, sleepers, rails)
+  steel grey  railways (rail mesh: ballast, sleepers, rails)
   white       buildings
   blue-grey   tunnel tubes and portals
   green       sidewalks;  orange: median barriers   (--kinds adds the rest: signs, wires, the collision meshes)
@@ -19,8 +19,13 @@ one directional (Lambert) light and a little ambient light, in flat colours:
               (the map's maxheight, Earth's roads.height_limit_lines) as high as the sign, a pickup under PICKUP_BELOW_M), and
               violet: reference wagons, 4.3 m high, nose to tail along every railway: what clears an underpass and what
               doesn't shows (--no-vehicles: none). A ground road's truck stands on the terrain (Earth paints those roads
-              into it), a bridge's on its deck. A red post where the map has a bridge and no deck is drawn over the
+              into it), a bridge's on its deck. A black post where the map has a bridge and no deck is drawn over the
               terrain, or a railway and no track: a structure Earth left out
+  yellow      a truck or wagon whose body (0.5 m over its wheels to its roof) hits a road, deck, track or tunnel tube that
+              isn't its own (earth_checks.vehicle_hits: from the meshes, exact)
+  red         where two of the map's lines cross at different levels, the meshes of one cutting through the other's: a deck
+              through a track, a track through a road's ground (earth_checks.penetrations); also in the overview
+  The counts of both are in the log and, with --dump, in <name>_checks.json (tools/earth_eval.py compares them)
 
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
@@ -62,6 +67,9 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import earth_checks  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -70,17 +78,19 @@ BLOCK_STEP = 128            # a block's centre is a multiple of this (m)
 TILE = 256.0                # roads.TILE: an anchor road tile's side (m)
 
 # ---- classes: what a triangle is, its debug colour, its name in the legend ---------------------------------------------------
-GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON, MISSING, ROSE, FELL = range(15)
+GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON, MISSING, ROSE, FELL, HIT, CUT = range(17)
 CLASS_NAME = ["ground", "ground moved by the rally grader", "road", "bridge deck", "rail", "building", "tunnel tube / portal",
               "sidewalk", "median barrier", "other mesh (--kinds)", "reference truck, 4 m high (a signed limit: its height)",
               "reference wagon, 4.3 m high", "the map's bridge with no deck, or railway with no track, drawn",
-              "ground risen since before", "ground fallen since before"]
+              "ground risen since before", "ground fallen since before",
+              "a truck or wagon whose body hits a road, deck, track or tube not its own (earth_checks)",
+              "road / rail meshes cutting each other where the map has them at different levels (earth_checks)"]
 CLASS_RGB = np.array([
     (0.55, 0.38, 0.22),     # ground: brown
     (1.00, 0.00, 1.00),     # moved by the grader: magenta
     (1.00, 0.45, 0.72),     # road: pink
     (0.90, 0.22, 0.52),     # deck: deeper pink
-    (1.00, 0.85, 0.10),     # rail: yellow
+    (0.40, 0.38, 0.46),     # rail: steel grey
     (1.00, 1.00, 1.00),     # building: white
     (0.42, 0.62, 0.80),     # tunnel: blue-grey
     (0.50, 0.80, 0.42),     # sidewalk: green
@@ -88,10 +98,14 @@ CLASS_RGB = np.array([
     (0.70, 0.55, 0.90),     # anything else: lilac
     (0.10, 0.80, 0.85),     # reference truck: cyan
     (0.45, 0.25, 0.75),     # reference wagon: violet
-    (0.90, 0.05, 0.05),     # a map line with nothing under it: red posts
+    (0.08, 0.08, 0.08),     # a map line with nothing under it: black posts
     (0.92, 0.30, 0.20),     # ground that rose since before: red
     (0.25, 0.45, 0.95),     # ground that fell since before: blue
+    (1.00, 0.93, 0.00),     # a vehicle hitting what isn't its own: yellow
+    (1.00, 0.00, 0.00),     # meshes cutting each other at a crossing of different levels: red
 ])
+CHECK_CLASSES = {"ground": (0, 1), "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
+HIT_BY = (2, 3, 4, 6)       # what a vehicle's body may not cut: ROAD, DECK, RAIL, TUNNEL
 KIND_CLASS = {"road": ROAD, "deck": DECK, "rail": RAIL, "bld": BUILDING, "b3dmr": BUILDING, "tunnel": TUNNEL, "walk": WALK,
               "barrier": BARRIER}
 DEFAULT_KINDS = ("road", "deck", "tunnel", "rail", "bld", "b3dmr", "walk", "barrier")
@@ -1430,15 +1444,29 @@ def main():
         T.append(t)
         C.append(np.full(len(t), KIND_CLASS.get(kind, OTHER), np.int8))
     tris, cls = np.concatenate(T), np.concatenate(C)
-    surface = (tris, cls)           # (the surface grid: without the vehicles)
+    surface = (tris, cls)           # (the surface grid: without the vehicles, before the checks' colours)
+    checks = {}
+    map_l, limits = map_lines(a, frame, box, log)
+    if map_l is not None:
+        log(f"  map lines: {len(map_l['road'])} roads, {len(map_l['rail'])} railways")
+        cut, xings = earth_checks.penetrations(tris, cls, map_l, CHECK_CLASSES)
+        in_box = [c for c in xings if box[0] <= c[0] <= box[2] and box[1] <= c[1] <= box[3]]
+        checks.update(crossings=len(in_box), crossings_cut=earth_checks.count_cut(xings, box))
+        log(f"  crossings of the map's lines at different levels: {checks['crossings']}, "
+            f"{checks['crossings_cut']} with meshes cutting each other (red)")
+        cls = np.where(cut, CUT, cls).astype(np.int8)
     if not a.no_vehicles:
-        lines, limits = map_lines(a, frame, box, log)
-        if lines is not None:
-            log(f"  map lines: {len(lines['road'])} roads, {len(lines['rail'])} railways")
         if limits:
             log(f"  height limits: " + ", ".join(f"{h:g} m" for h in sorted({h for _l, h in limits})))
-        vt, vc = reference_vehicles(tris, cls, limits, lines, ground=lambda x, y: bilinear(z, x0, y0, x, y))
-        log(f"  reference vehicles: {int((vc == TRUCK).sum()) // 12} trucks, {int((vc == WAGON).sum()) // 12} wagons"
+        vt, vc = reference_vehicles(tris, surface[1], limits, map_l, ground=lambda x, y: bilinear(z, x0, y0, x, y))
+        nv = int(np.isin(vc, (TRUCK, WAGON)).sum()) // 12
+        nv_t = int((vc == TRUCK).sum()) // 12
+        hits = earth_checks.vehicle_hits(vt[:nv * 12], tris[np.isin(surface[1], HIT_BY)])
+        vc = vc.copy()
+        vc[:nv * 12][np.repeat(hits, 12)] = HIT
+        checks.update(vehicles=nv, vehicles_hit=int(hits.sum()))
+        log(f"  reference vehicles: {nv} ({nv_t} trucks, {nv - nv_t} wagons), {int(hits.sum())} hitting a road or rail not "
+            f"their own (yellow)"
             + (f"; {int((vc == MISSING).sum()) // 12} points of the map's roads and railways with nothing drawn under them"
                if (vc == MISSING).any() else ""))
         tris, cls = np.concatenate([tris, vt]), np.concatenate([cls, vc])
@@ -1463,6 +1491,13 @@ def main():
             dz = compare_heights(a.compare_data, a.aid, blk[0], blk[1], z, log) if a.compare_data else None
             ov_meshes = read_tiles(data_dir, a.aid, tiles_covering(px, py, OVERVIEW_M), kinds, log)
             ot, oc = overview_scene(z, x0, y0, ov_box, None if a.no_holes else holes, ov_meshes, dz)
+            ov_map, _ = map_lines(a, frame, ov_box, log, margin=0.0)
+            if ov_map is not None:
+                base_cls = np.where(np.isin(oc, (ROSE, FELL)), GROUND, oc)
+                ocut, oxings = earth_checks.penetrations(ot, base_cls, ov_map, CHECK_CLASSES)
+                oc = np.where(ocut, CUT, oc).astype(np.int8)
+                checks.update(overview_crossings=len(oxings), overview_crossings_cut=earth_checks.count_cut(oxings))
+                log(f"  overview: {len(oxings)} crossings at different levels, {checks['overview_crossings_cut']} cutting (red)")
             log(f"  overview: {len(ot)} triangles" + (f", {int((oc == ROSE).sum())} of rising ground and {int((oc == FELL).sum())}"
                                                      f" of falling ground since --compare-data" if dz is not None else ""))
             cam = overview_camera(ot, target, W, H)
@@ -1498,6 +1533,10 @@ def main():
             cols=3 if len(panels) in (5, 6) else 2).save(path)
     log(f"wrote {path}")
     if a.dump:
+        path = os.path.join(a.out, f"{a.name}_checks.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(checks, f, indent=1)
+        log(f"wrote {path}")
         c, zs = surface_grid(*surface, box)
         path = os.path.join(a.out, f"{a.name}_surface.npz")
         np.savez_compressed(path, cls=c, z=zs, box=np.array(box, np.float64), step=np.float64(SURFACE_STEP_M),
