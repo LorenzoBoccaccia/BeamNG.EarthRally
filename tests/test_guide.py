@@ -343,3 +343,14 @@ def test_a_failure_in_the_guidance_leaves_the_games_own_route(run):
 def test_the_position_readout_names_the_liaison_line_too(run):
     run.execute("CAR = at(1000); core.onUpdate(1.1)")
     assert any("line " in l and "road1" in l and "m along" in l for l in logs(run, "where:"))
+
+
+def test_the_target_stands_on_the_games_ground_not_at_the_lines_height(run):
+    # (Faro, 2026-11-16: the line's heights 10 m over the trunk in its cutting, the arrows climbing off the road to them)
+    run.execute("coverLine(0, 1400)")
+    run.execute("core_terrain = { getTerrainHeight = function(p) return p.z - 10 end }")
+    run.execute("gameRoutes(0)")
+    want = run.eval("(select(3, guide.pointAt(ROAD, guide.along(ROAD, GM.endWP[1].x, GM.endWP[1].y, 0, ROAD.total))))") - 10
+    assert run.eval("lastCall().wp[1].z") == pytest.approx(want, abs=0.5)
+    run.execute("core_terrain = nil; GM_CALLS = {}; core.onNavgraphReloaded(); core.onUpdate(1.1)")
+    assert run.eval("lastCall().wp[1].z") == pytest.approx(want + 10, abs=0.5)      # (no ground yet: the line's own)
