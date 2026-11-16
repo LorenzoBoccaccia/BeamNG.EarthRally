@@ -14,10 +14,13 @@ one directional (Lambert) light and a little ambient light, in flat colours:
   blue-grey   tunnel tubes and portals
   green       sidewalks;  orange: median barriers   (--kinds adds the rest: signs, wires, the collision meshes)
   dark line   the stage line (--geometry, repeatable); blue needle: the point
-  cyan        reference trucks, 4 m high (every TRUCK_EVERY_M along every road and road deck; on a road with a height limit
+  cyan        reference trucks, 4 m high (every TRUCK_EVERY_M along every road of Earth's map, on the road or deck mesh
+              under it (vehicles_on_lines); on a road with a height limit
               (the map's maxheight, Earth's roads.height_limit_lines) as high as the sign, a pickup under PICKUP_BELOW_M), and
               violet: reference wagons, 4.3 m high, nose to tail along every railway: what clears an underpass and what
-              doesn't shows (--no-vehicles: none)
+              doesn't shows (--no-vehicles: none). A ground road's truck stands on the terrain (Earth paints those roads
+              into it), a bridge's on its deck. A red post where the map has a bridge and no deck is drawn over the
+              terrain, or a railway and no track: a structure Earth left out
 
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
@@ -60,10 +63,10 @@ BLOCK_STEP = 128            # a block's centre is a multiple of this (m)
 TILE = 256.0                # roads.TILE: an anchor road tile's side (m)
 
 # ---- classes: what a triangle is, its debug colour, its name in the legend ---------------------------------------------------
-GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON = range(12)
+GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON, MISSING = range(13)
 CLASS_NAME = ["ground", "ground moved by the rally grader", "road", "bridge deck", "rail", "building", "tunnel tube / portal",
               "sidewalk", "median barrier", "other mesh (--kinds)", "reference truck, 4 m high (a signed limit: its height)",
-              "reference wagon, 4.3 m high"]
+              "reference wagon, 4.3 m high", "the map's bridge with no deck, or railway with no track, drawn"]
 CLASS_RGB = np.array([
     (0.55, 0.38, 0.22),     # ground: brown
     (1.00, 0.00, 1.00),     # moved by the grader: magenta
@@ -77,6 +80,7 @@ CLASS_RGB = np.array([
     (0.70, 0.55, 0.90),     # anything else: lilac
     (0.10, 0.80, 0.85),     # reference truck: cyan
     (0.45, 0.25, 0.75),     # reference wagon: violet
+    (0.90, 0.05, 0.05),     # a map line with nothing under it: red posts
 ])
 KIND_CLASS = {"road": ROAD, "deck": DECK, "rail": RAIL, "bld": BUILDING, "b3dmr": BUILDING, "tunnel": TUNNEL, "walk": WALK,
               "barrier": BARRIER}
@@ -495,10 +499,285 @@ def limit_at(limits, xy, reach=LIMIT_NEAR_M):
     return min(hs) if hs else None
 
 
-def reference_vehicles(tris, cls, limits=()):
+MISSING_EVERY_M = 5.0               # m between the red posts along a map line with nothing under it
+MISSING_POST = (0.6, 0.6, 6.0)      # m: a post's side, side and height
+LOOK_M = 3.0                        # m ahead and behind a vehicle its slope is read
+LEVEL_MERGE_M = 1.0                 # m: surfaces under a point this close are one level (a road mesh on its deck, rails on
+                                    # their sleepers on their ballast)
+PREF_W = 0.5                        # the weight of a point's preferred level (its line's bridge / tunnel / ground) against its
+                                    # continuity with the line's last point (1)
+PATHS = ("footway", "cycleway", "path", "pedestrian", "steps", "bridleway", "sidewalk", "crossing")    # (no trucks)
+
+
+class Surfaces:
+    """The heights of triangles (n, 3, 3) under a point (x, y): every one whose plan holds it, at its plane there."""
+
+    def __init__(self, tris, size=4.0):
+        self.t = np.asarray(tris, np.float64)
+        self.size = float(size)
+        self.b = {}
+        if not len(self.t):
+            return
+        lo = np.floor(self.t[:, :, :2].min(axis=1) / self.size).astype(np.int64)
+        hi = np.floor(self.t[:, :, :2].max(axis=1) / self.size).astype(np.int64)
+        for i in range(len(self.t)):
+            for gx in range(lo[i, 0], hi[i, 0] + 1):
+                for gy in range(lo[i, 1], hi[i, 1] + 1):
+                    self.b.setdefault((gx, gy), []).append(i)
+
+    def heights(self, x, y):
+        """The sorted heights (m) of the triangles under (x, y)."""
+        idx = self.b.get((int(math.floor(x / self.size)), int(math.floor(y / self.size))))
+        if not idx:
+            return np.zeros(0)
+        t = self.t[idx]
+        a, b, c = t[:, 0], t[:, 1], t[:, 2]
+        v0, v1 = b[:, :2] - a[:, :2], c[:, :2] - a[:, :2]
+        v2 = np.array([x, y]) - a[:, :2]
+        d = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
+        ok = np.abs(d) > 1e-12
+        d = np.where(ok, d, 1.0)
+        u = (v2[:, 0] * v1[:, 1] - v2[:, 1] * v1[:, 0]) / d
+        v = (v0[:, 0] * v2[:, 1] - v0[:, 1] * v2[:, 0]) / d
+        inside = ok & (u >= -1e-6) & (v >= -1e-6) & (u + v <= 1.0 + 1e-6)
+        z = a[:, 2] + u * (b[:, 2] - a[:, 2]) + v * (c[:, 2] - a[:, 2])
+        return np.sort(z[inside])
+
+
+def levels(z, top=False, merge=LEVEL_MERGE_M):
+    """The levels of sorted heights z: runs closer than merge one level, at its highest (top: rails' heads) or its middle."""
+    if not len(z):
+        return []
+    out, run = [], [float(z[0])]
+    for v in z[1:]:
+        if v - run[-1] <= merge:
+            run.append(float(v))
+        else:
+            out.append(max(run) if top else float(np.median(run)))
+            run = [float(v)]
+    out.append(max(run) if top else float(np.median(run)))
+    return out
+
+
+def along(line, every):
+    """Points every metres along line (k, 2) from every / 2 on, with their unit tangents and their fraction of its length."""
+    line = np.asarray(line, np.float64)
+    seg = np.hypot(*np.diff(line, axis=0).T)
+    L = float(seg.sum())
+    if L <= 0:
+        return []
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    out = []
+    for s in np.arange(every / 2.0, L, every):
+        k = min(int(np.searchsorted(cum, s, side="right")) - 1, len(seg) - 1)
+        while k < len(seg) - 1 and seg[k] <= 0:
+            k += 1
+        f = (s - cum[k]) / seg[k] if seg[k] > 0 else 0.0
+        p = line[k] + f * (line[k + 1] - line[k])
+        t = (line[k + 1] - line[k]) / seg[k] if seg[k] > 0 else np.array([1.0, 0.0])
+        out.append((p, t, s / L))
+    return out
+
+
+def _choose(cands, prefs):
+    """One level per point of a chain (cands: [levels], prefs: [preferred height or None]): the least sum of the steps between
+    consecutive points (1 per m) and of each point's distance from its preferred height (PREF_W per m). None where a point has
+    no level (the chain is cut there)."""
+    out = [None] * len(cands)
+    i = 0
+    while i < len(cands):
+        if not cands[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(cands) and cands[j]:
+            j += 1
+        cost = [PREF_W * (abs(z - prefs[i]) if prefs[i] is not None else 0.0) for z in cands[i]]
+        back = []
+        for k in range(i + 1, j):
+            nc, nb = [], []
+            for z in cands[k]:
+                steps = [cost[m] + abs(z - cands[k - 1][m]) for m in range(len(cands[k - 1]))]
+                m = int(np.argmin(steps))
+                nc.append(steps[m] + PREF_W * (abs(z - prefs[k]) if prefs[k] is not None else 0.0))
+                nb.append(m)
+            cost, back = nc, back + [nb]
+        m = int(np.argmin(cost))
+        for k in range(j - 1, i - 1, -1):
+            out[k] = cands[k][m]
+            if k > i:
+                m = back[k - i - 1][m]
+        i = j
+    return out
+
+
+DECK_UNDER_M = 0.5                  # m under the terrain a bridge's deck may lie and still be its deck (its ends rest on their
+                                    # embankments: a deck end 0.1-0.8 m over the ground was taken for no deck at all)
+
+
+SHORT_TUNNEL_M = 60.0               # m: a road tunnel this short is open ground in Earth (gradesep's open underpasses), its
+                                    # road painted on the terrain like any ground road
+
+
+def _kind(ranges, f, length=None):
+    """"bridge", "tunnel" or None (ground) at fraction f of a line length metres long (a tunnel stretch no longer than
+    SHORT_TUNNEL_M is ground)."""
+    for a, b, k in ranges:
+        if a <= f <= b:
+            if k == "tunnel" and length is not None and (b - a) * length <= SHORT_TUNNEL_M:
+                return None
+            return k
+    return None
+
+
+def _length(xy):
+    return float(np.hypot(*np.diff(np.asarray(xy, np.float64), axis=0).T).sum()) if len(xy) >= 2 else 0.0
+
+
+def point_at(line, s):
+    """(point, unit tangent) at s metres along line (k, 2)."""
+    line = np.asarray(line, np.float64)
+    seg = np.hypot(*np.diff(line, axis=0).T)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    k = int(np.clip(np.searchsorted(cum, s, side="right") - 1, 0, len(seg) - 1))
+    while k < len(seg) - 1 and seg[k] <= 0:
+        k += 1
+    f = (s - cum[k]) / seg[k] if seg[k] > 0 else 0.0
+    t = (line[k + 1] - line[k]) / seg[k] if seg[k] > 0 else np.array([1.0, 0.0])
+    return line[k] + f * (line[k + 1] - line[k]), t
+
+
+def crossings_under(line, others):
+    """Fractions of line where it crosses under one of others: [(xy (k, 2), ranges, rail)], a railway anywhere (over it, or
+    level with it), a road where it is on a bridge."""
+    line = np.asarray(line, np.float64)
+    L = _length(line)
+    if L <= 0:
+        return []
+    a0, a1 = line[:-1], line[1:]
+    cum_a = np.concatenate([[0.0], np.cumsum(np.hypot(*(a1 - a0).T))])
+    out = []
+    for oxy, oranges, rail in others:
+        o = np.asarray(oxy, np.float64)
+        if o is line or len(o) < 2:
+            continue
+        b0, b1 = o[:-1], o[1:]
+        cum_b = np.concatenate([[0.0], np.cumsum(np.hypot(*(b1 - b0).T))])
+        Lb = cum_b[-1]
+        d1, d2 = a1 - a0, b1 - b0
+        for i in range(len(a0)):
+            den = d1[i, 0] * d2[:, 1] - d1[i, 1] * d2[:, 0]
+            ok = np.abs(den) > 1e-12
+            den = np.where(ok, den, 1.0)
+            w = b0 - a0[i]
+            ta = (w[:, 0] * d2[:, 1] - w[:, 1] * d2[:, 0]) / den
+            tb = (w[:, 0] * d1[i, 1] - w[:, 1] * d1[i, 0]) / den
+            hit = ok & (ta >= 0) & (ta <= 1) & (tb >= 0) & (tb <= 1)
+            for j in np.where(hit)[0]:
+                fb = (cum_b[j] + tb[j] * (cum_b[j + 1] - cum_b[j])) / Lb if Lb > 0 else 0.0
+                if rail or _kind(oranges, fb, Lb) == "bridge":
+                    out.append((cum_a[i] + ta[j] * (cum_a[i + 1] - cum_a[i])) / L)
+    return sorted(out)
+
+
+def missing_on_lines(lines, surf, box, ground=None, bridges_only=False, top=False, every=MISSING_EVERY_M):
+    """[(x, y)] every metres along the lines where the meshes (surf) have nothing for the map's line: on a bridge stretch no
+    deck at or over the terrain (DECK_UNDER_M); elsewhere (bridges_only False: a railway, always a mesh) no track at all. Not in a
+    tunnel (drawn in its tube), nor on a road's ground stretch (Earth paints those into the terrain: no mesh to miss). Only
+    inside box (x0, y0, x1, y1) less 2 m (the meshes are cut there)."""
+    out = []
+    for xy, ranges in lines:
+        L = _length(xy)
+        for p, _t, f in along(xy, every):
+            if not (box[0] + 2 <= p[0] <= box[2] - 2 and box[1] + 2 <= p[1] <= box[3] - 2):
+                continue
+            kind = _kind(ranges, f, L)
+            if kind == "tunnel" or (bridges_only and kind != "bridge"):
+                continue
+            lv = levels(surf.heights(*p), top)
+            if kind == "bridge" and ground is not None:
+                lv = [v for v in lv if v >= float(ground(*p)) - DECK_UNDER_M]
+            if not lv:
+                out.append((float(p[0]), float(p[1])))
+    return out
+
+
+def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M, painted=True, box=None, probes=None):
+    """[(base (3,), axis (3,))]: a vehicle every metres along each line of Earth's map, heading along it. lines: [(xy (k, 2),
+    ranges)], ranges [(start, end, "bridge" | "tunnel")] fractions of the line (Earth's roads.level_ranges). Where it stands:
+    - a ground stretch of a road (painted True): on the terrain, ground(x, y): Earth paints its ground roads into the terrain
+      (surface.paint_roads), only their edges and markings are meshes;
+    - a ground stretch of a railway (painted False): on the track mesh's level nearest the terrain;
+    - a bridge stretch: on a level of surf (the decks) at or over the terrain (DECK_UNDER_M), the one nearest the line's last
+      point (_choose: a ramp onto a stack keeps to its own deck), the highest where nothing else tells (the deck, not the edges
+      of a road painted under it). A road not on a bridge there never takes a deck's level (an overpass is not the road under
+      it);
+    - a tunnel stretch: none (in its tube); one SHORT_TUNNEL_M or shorter is ground (Earth opens it).
+    probes: per line, the fractions where it crosses under a bridge or a railway (crossings_under): a vehicle stands there
+    first, the ones every metres around it.
+    Its slope from the same surface LOOK_M ahead and behind. None within 0.75 * every of one placed on the same level (copies
+    of one road, segments end to end). box (x0, y0, x1, y1): only points inside it (the view)."""
+    placed = np.zeros((0, 3))
+    pb = {}
+    out = []
+    chosen = []                     # (probe?, base, axis) of every line, placed probes first
+    for li, (xy, ranges) in enumerate(lines):
+        L = _length(xy)
+        pts = [(p, t, f, False) for p, t, f in along(xy, every)]
+        for f in (probes[li] if probes is not None else []):
+            p, t = point_at(xy, f * L)
+            pts.append((p, t, f, True))
+        pts.sort(key=lambda q: q[2])
+        if not pts:
+            continue
+        cands, prefs, kinds = [], [], []
+        for p, _t, f, _pr in pts:
+            kind = _kind(ranges, f, L)
+            g = float(ground(*p)) if ground is not None else None
+            if box is not None and not (box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]):
+                lv, pref = [], None
+            elif kind == "tunnel":
+                lv, pref = [], None
+            elif kind != "bridge" and painted and g is not None:
+                lv, pref = [g], None
+            elif kind == "bridge":
+                lv = [v for v in levels(surf.heights(*p), top) if g is None or v >= g - DECK_UNDER_M]
+                pref = max(lv) if lv else None
+            else:
+                lv = levels(surf.heights(*p), top)
+                pref = g if lv else None
+            cands.append(lv)
+            prefs.append(pref)
+            kinds.append(kind)
+        for (p, t, _f, probe), z, kind in zip(pts, _choose(cands, prefs), kinds):
+            if z is None:
+                continue
+            zs = []
+            for d in (LOOK_M, -LOOK_M):
+                q = p + d * t
+                if kind != "bridge" and painted and ground is not None:
+                    zs.append(float(ground(*q)))
+                    continue
+                lv = levels(surf.heights(*q), top)
+                near = min(lv, key=lambda v: abs(v - z)) if lv else None
+                zs.append(near if near is not None and abs(near - z) <= level else None)
+            slope = (zs[0] - zs[1]) / (2 * LOOK_M) if None not in zs else 0.0
+            chosen.append((probe, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
+    for probe, base, axis in sorted(chosen, key=lambda c: not c[0]):        # (the probes first)
+        if len(placed) and len(_near(placed, pb, every, base, every * 0.75, level)):
+            continue
+        out.append((base, axis))
+        placed = np.vstack([placed, base])
+        pb = _buckets(placed, every)
+    return out
+
+
+def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
     """(triangles, classes) of the reference trucks along the roads and road decks (not a rail deck: a deck with the track on it)
     and the wagons along the railways. limits: [(line (k, 2) in the frame, m)], the roads' height limits: a truck near one is as
-    high as it, a pickup under PICKUP_BELOW_M."""
+    high as it, a pickup under PICKUP_BELOW_M. lines: {"road": [(xy, ranges)], "rail": [...]} (map_lines: Earth's map), the
+    vehicles along them (vehicles_on_lines), ground(x, y) the terrain's height; None: placed from the meshes alone
+    (place_vehicles: their headings guessed, wrong at junctions, deck ends and wide places)."""
     up = face_normals(tris)[:, 2] * up_sign(tris, cls) >= UP_NZ if len(tris) else np.zeros(0, bool)
     road = ((cls == ROAD) | (cls == DECK)) & up
     rail = (cls == RAIL) & up
@@ -511,8 +790,26 @@ def reference_vehicles(tris, cls, limits=()):
             near = _near(R, rb, 4.0, c + (0.0, 0.0, 1.0), 3.0, 1.6)
             if len(near):
                 road[i] = False
+    missing = []
+    if lines is not None:
+        g = tris[cls <= MOVED]              # (the ground: cropped to the view's box)
+        box = ((g[..., 0].min(), g[..., 1].min(), g[..., 0].max(), g[..., 1].max()) if len(g)
+               else (tris[..., 0].min(), tris[..., 1].min(), tris[..., 0].max(), tris[..., 1].max()))
+        rs, ts = Surfaces(tris[road]), Surfaces(tris[rail])
+        roads_, rails_ = lines.get("road", []), lines.get("rail", [])
+        others = [(xy, r, False) for xy, r in roads_] + [(xy, r, True) for xy, r in rails_]
+        probes = [crossings_under(xy, others) for xy, _r in roads_]
+        trucks = vehicles_on_lines(roads_, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes)
+        wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box)
+        decks = Surfaces(tris[(cls == DECK) & up])      # (a bridge's: only a deck counts, not a road's edges painted under it)
+        tracks = Surfaces(tris[rail | ((cls == DECK) & up)])    # (a railway's: its track, or a deck it runs on)
+        missing = (missing_on_lines(lines.get("road", []), decks, box, ground, bridges_only=True)
+                   + missing_on_lines(lines.get("rail", []), tracks, box, ground, top=True))
+    else:
+        trucks = place_vehicles(tris[road], TRUCK_EVERY_M, TRUCK_LWH)
+        wagons = place_vehicles(tris[rail], WAGON_EVERY_M, WAGON_LWH, top=True, neigh=RAIL_NEIGH_M)
     T = []
-    for base, axis in place_vehicles(tris[road], TRUCK_EVERY_M, TRUCK_LWH):
+    for base, axis in trucks:
         h = limit_at(limits, base[:2]) if limits else None
         if h is None:
             T.append(box_triangles(base, axis, *TRUCK_LWH))
@@ -520,11 +817,59 @@ def reference_vehicles(tris, cls, limits=()):
             T.append(box_triangles(base, axis, *PICKUP_LWH, h))
         else:
             T.append(box_triangles(base, axis, TRUCK_LWH[0], TRUCK_LWH[1], h))
-    W = [box_triangles(base, axis, *WAGON_LWH) for base, axis in place_vehicles(tris[rail], WAGON_EVERY_M, WAGON_LWH, top=True,
-                                                                  neigh=RAIL_NEIGH_M)]
+    W = [box_triangles(base, axis, *WAGON_LWH) for base, axis in wagons]
     T = np.concatenate(T) if T else np.zeros((0, 3, 3))
     W = np.concatenate(W) if W else np.zeros((0, 3, 3))
-    return np.concatenate([T, W]), np.array([TRUCK] * len(T) + [WAGON] * len(W), np.int8)
+    M = [box_triangles((x, y, float(ground(x, y)) if ground is not None else 0.0), (1.0, 0.0, 0.0), *MISSING_POST)
+         for x, y in missing]
+    M = np.concatenate(M) if M else np.zeros((0, 3, 3))
+    return (np.concatenate([T, W, M]),
+            np.array([TRUCK] * len(T) + [WAGON] * len(W) + [MISSING] * len(M), np.int8))
+
+
+def map_lines(a, frame, box, log, margin=30.0):
+    """({"road": [(xy (k, 2), ranges)], "rail": [...]}, limits): Earth's roads (not paths) and railways round box from its map
+    cells, each line in the frame with its bridge / tunnel ranges (roads.level_ranges), once per feature; and the roads'
+    height limits (height_limits). (None, []) when Earth's map data can't be read."""
+    try:
+        bw = earth_state(a, log)
+        md = getattr(bw._s, "md", None)
+        if md is None:
+            return None, []
+        import mapcells
+        import roads
+        xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
+        la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
+        out, seen = {"road": [], "rail": []}, set()
+        for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
+            feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
+            if feats is None or not len(feats):
+                continue
+            xy = feats.xy_in(frame)
+            sub, cl = feats.attrs.get("subtype"), feats.attrs.get("class")
+            for i in range(len(feats)):
+                fid = str(feats.ids[i])          # (an Overture GERS id)
+                if fid in seen:
+                    continue
+                kind = "rail" if sub is not None and str(sub[i]) == "rail" else "road"
+                if kind == "road" and cl is not None and str(cl[i]) in PATHS:
+                    continue
+                rings = [r for part in feats.parts(i, xy) for r in part if len(r) >= 2]
+                if not rings or not any(r[:, 0].max() >= box[0] - margin and r[:, 0].min() <= box[2] + margin
+                                        and r[:, 1].max() >= box[1] - margin and r[:, 1].min() <= box[3] + margin
+                                        for r in rings):
+                    continue
+                seen.add(fid)
+                try:
+                    ranges = [(float(s0), float(s1), str(kd)) for s0, s1, kd in roads.level_ranges(feats, i)]
+                except Exception:
+                    ranges = []
+                for r in rings:
+                    out[kind].append((np.asarray(r, np.float64), ranges if len(rings) == 1 else []))
+        return out, height_limits(a, frame, box, log)
+    except Exception as e:      # (the vehicles are then placed from the meshes alone)
+        log(f"  map lines not read: {type(e).__name__}: {e}")
+        return None, []
 
 
 def height_limits(a, frame, box, log):
@@ -972,11 +1317,15 @@ def main():
     tris, cls = np.concatenate(T), np.concatenate(C)
     surface = (tris, cls)           # (the surface grid: without the vehicles)
     if not a.no_vehicles:
-        limits = height_limits(a, frame, box, log)
+        lines, limits = map_lines(a, frame, box, log)
+        if lines is not None:
+            log(f"  map lines: {len(lines['road'])} roads, {len(lines['rail'])} railways")
         if limits:
             log(f"  height limits: " + ", ".join(f"{h:g} m" for h in sorted({h for _l, h in limits})))
-        vt, vc = reference_vehicles(tris, cls, limits)
-        log(f"  reference vehicles: {int((vc == TRUCK).sum()) // 12} trucks, {int((vc == WAGON).sum()) // 12} wagons")
+        vt, vc = reference_vehicles(tris, cls, limits, lines, ground=lambda x, y: bilinear(z, x0, y0, x, y))
+        log(f"  reference vehicles: {int((vc == TRUCK).sum()) // 12} trucks, {int((vc == WAGON).sum()) // 12} wagons"
+            + (f"; {int((vc == MISSING).sum()) // 12} points of the map's roads and railways with nothing drawn under them"
+               if (vc == MISSING).any() else ""))
         tris, cls = np.concatenate([tris, vt]), np.concatenate([cls, vc])
     log(f"  ground: {int((cls <= MOVED).sum())} triangles; total {len(tris)}")
     pz = float(bilinear(z, x0, y0, px, py))
