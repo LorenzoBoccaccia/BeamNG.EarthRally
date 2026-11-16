@@ -1860,9 +1860,11 @@ local function launch()
   if mission.fgVariables then
     mission.fgVariables.serviceStallPos, mission.fgVariables.serviceStallRot = pl.pos, pl.rot
   end
-  -- an edition of days: where the day ends (a day that does not end where it began has its end stall elsewhere, see dayStallTick)
+  -- where the loop ends: a loop (a day of an edition of days, or a loop of its own with no road section back to its service park, the
+  -- Popoli Stage, the testbed) that does not end where it began has its end stall there, past its last time control (see dayStallTick);
+  -- else the game waited for the car back at the start's stall, kilometres behind the stage's finish
   st.dayEnd = nil
-  if st.edition.baseEdition then
+  do
     local lastLeg = st.edition.legs[#st.edition.legs]
     local firstPts, lastPts = legPoints(st.edition.legs[1]), legPoints(lastLeg)
     local n = #lastPts
@@ -2067,6 +2069,7 @@ function M.onAnyMissionWillChange(state, mission, abandoned)
   st.dayStop = nil
   local de = st.dayEnd
   if not (de and st.anchor and st.edition and st.edition.edition == ours) then return end
+  if not st.edition.baseEdition then return end   -- (a loop of its own: no day to finish, nothing comes next)
   local mgr = rawget(_G, 'gameplay_rallyLoop')
   local rm = mgr and mgr.getManager and mgr.getManager()
   local cur = rm and rm.getCurrentMissionId and rm:getCurrentMissionId()
