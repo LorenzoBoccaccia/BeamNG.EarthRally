@@ -18,6 +18,7 @@
     {"name": "la_pregerson", "what": "Los Angeles: the Judge Harry Pregerson Interchange, I-105 and I-110, with HOV and transit levels (complex interchanges' list)", "at": [33.9287457, -118.2809393], "radius": 120},
     {"name": "birmingham_gravelly_hill", "what": "Birmingham: Gravelly Hill (Spaghetti Junction), the M6 and A38(M) over a canal and a railway (complex interchanges' list)", "at": [52.513, -1.8665], "radius": 120},
     {"name": "shanghai_yanan_puxi", "what": "Shanghai: the Yan'an Elevated Road over the North-South Elevated Road in Puxi, stacked city viaducts (complex interchanges' list)", "at": [31.2264545, 121.4648755], "radius": 120},
-    {"name": "kawazu_nanadaru_loop", "what": "Kawazu: the Nanadaru Loop Bridge, a double spiral climbing a valley over itself (complex interchanges' list)", "at": [34.7915774, 138.93866], "radius": 100}
+    {"name": "kawazu_nanadaru_loop", "what": "Kawazu: the Nanadaru Loop Bridge, a double spiral climbing a valley over itself (complex interchanges' list)", "at": [34.7915774, 138.93866], "radius": 100},
+    {"name": "barcelona_trench", "what": "Barcelona: a main road in a trench under perforated canopy covers, street-level side roads and parking right beside it (the user's in-game report)", "at": [41.411868, 2.198433], "radius": 80}
   ]
 }
