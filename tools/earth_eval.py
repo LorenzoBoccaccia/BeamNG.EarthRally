@@ -10,8 +10,9 @@ Each junction is built twice in its own folder (<out>/<name>/before, <out>/<name
 per tree, Earth's plan cache off), then:
 
   <out>/<name>.png      3 x 2: the before views in the top row, the after views under them; by default the overview (1 km
-                        round the point from above, the after one tinted red where the ground rose and blue where it fell
-                        MINOR_M or more), the close-up from above and from the south-west; the verdict in the title
+                        round the point in 3D from the south-west, the after one with the ground that rose red and the ground
+                        that fell blue, ev.CHANGED_M or more), the close-up from above and from the south-west; the verdict
+                        in the title
   <out>/<name>_diff.png the close-up's change seen from straight above: red where the surface rose, blue where it fell, grey
                         where something else is there (a road where the ground was, a deck gone), white where it is the same;
                         and its key with the numbers
@@ -79,6 +80,8 @@ def build_side(j, side, tree, a, log):
     os.makedirs(out, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "earth_view.py"), "--earth", tree, "--out", out, "--name", "view", "--dump",
            "--label-prefix", f"{side}: ", "--image", a.image, "--views", a.views] + junction_args(j)
+    if side == "after":         # (the overview marks the ground that moved since before)
+        cmd += ["--compare-data", os.path.join(a.out, j["name"], "before", "data")]
     for flag in ("reuse", "online", "no_buildings"):
         if getattr(a, flag):
             cmd.append("--" + flag.replace("_", "-"))
@@ -171,41 +174,6 @@ def key_panel(W, H, res):
     return pic
 
 
-def load_overview(path):
-    """(map (H, W, 3 uint8), heights (H, W), scale px/m, label) of earth_view's <name>_overview.npz, or None."""
-    if not os.path.isfile(path):
-        return None
-    with np.load(path, allow_pickle=False) as f:
-        return f["img"], f["z"].astype(np.float64), float(f["scale"]), str(f["label"])
-
-
-def overview_change(img, zb, za, minor_m=MINOR_M):
-    """The after overview's map (H, W, 3 uint8) tinted where its ground rose (red) or fell (blue) minor_m or more since before."""
-    dz = np.where(np.isfinite(za) & np.isfinite(zb), za - zb, 0.0)
-    out = img.astype(np.float64) / 255.0
-    for mask, rgb in ((dz >= minor_m, UP_RGB), (dz <= -minor_m, DOWN_RGB)):
-        out[mask] = 0.35 * out[mask] + 0.65 * np.asarray(rgb)
-    return out
-
-
-def overview_panels(j, a, W, H):
-    """{side: the overview panel (PIL)}: each side's overview, the after one with the ground that moved tinted."""
-    got = {side: load_overview(os.path.join(a.out, j["name"], side, "view_overview.npz")) for side in SIDES}
-    out = {}
-    for side in SIDES:
-        o = got[side]
-        if o is None:
-            continue
-        img, z, scale, label = o
-        f = img.astype(np.float64) / 255.0
-        if side == "after" and got["before"] is not None and got["before"][1].shape == z.shape:
-            f = overview_change(img, got["before"][1], z)
-            label = f"after: overview 1 x 1 km; red: ground rose, blue: fell {MINOR_M:g} m+"
-        cam = ev.view_camera(np.zeros(3), 0.0, 90.0, img.shape[1], img.shape[0], scale)
-        out[side] = ev.annotate_panel(f, cam, label)
-    return out
-
-
 def verdict_line(res):
     """The junction's result in a line: the verdict and how far each surface moved."""
     if res.get("error"):
@@ -221,23 +189,17 @@ def eval_picture(j, a, res, log):
     from PIL import Image
     W, H = (int(v) for v in a.image.lower().split("x"))
     views = [v.strip() for v in a.views.split(",") if v.strip()]
-    ovs = overview_panels(j, a, W, H) if any(ev.is_overview(v) for v in views) else {}
     grey = lambda: Image.new("RGB", (W, H), (230, 230, 230))    # noqa: E731
     panels = []
     for side in SIDES:
         for v in views:
-            if ev.is_overview(v):
-                panels.append(ovs.get(side) or grey())
-                continue
             p = os.path.join(a.out, j["name"], side, f"view_panel_{ev.view_name(v)}.png")
             panels.append(Image.open(p).convert("RGB") if os.path.isfile(p) else grey())
     sub = verdict_line(res) + f"      before: {os.path.basename(a.before)}   after: {os.path.basename(a.after)}"
     title = f"{j['name']}: {j.get('what', '')}"
     used = res.get("_used", [ev.GROUND, ev.ROAD])
-    extra = (ev.overview_legend() + [(tuple(int(c * 255) for c in UP_RGB), f"after overview: the ground rose {MINOR_M:g} m or more"),
-                                     (tuple(int(c * 255) for c in DOWN_RGB), f"after overview: the ground fell {MINOR_M:g} m or more")]
-             if ovs else [])
-    pic = ev.compose(panels, title, sub, ev.legend_entries(used, bool(j.get("geometry")), True, extra), cols=len(views))
+    has_line = bool(j.get("geometry")) or any(ev.is_overview(v) for v in views)
+    pic = ev.compose(panels, title, sub, ev.legend_entries(used, has_line, True), cols=len(views))
     path = os.path.join(a.out, f"{j['name']}.png")
     pic.save(path)
     log(f"  wrote {path}")
@@ -269,6 +231,16 @@ def run_junction(j, a, log):
             W, H = (int(v) for v in a.image.lower().split("x"))
             res["_diff"] = diff_image(sb, sa, W, H)
             res["_used"] = sorted(set(ub) | set(ua))
+    used = set(res.get("_used", []))
+    for side in SIDES:          # (the overview's classes too: the surface grid's are the close-up's)
+        lp = os.path.join(a.out, j["name"], side, "view.log")
+        if os.path.isfile(lp):
+            with open(lp, encoding="utf-8", errors="replace") as f:
+                t = f.read()
+            if "of rising ground" in t:
+                used |= {ev.ROSE, ev.FELL}
+    if "_used" in res:
+        res["_used"] = sorted(used)
     res["picture"] = eval_picture(j, a, res, log)
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
