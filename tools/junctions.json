@@ -13,6 +13,11 @@
     {"name": "vienna_suedtiroler", "what": "Vienna: Suedtiroler Platz over the trench of its lid (Earth drivability site)", "at": [48.18609, 16.37368], "radius": 60},
     {"name": "boston_bowker", "what": "Boston: the Bowker Overpass over Storrow Drive (Earth drivability site)", "at": [42.3512, -71.0923], "radius": 60},
     {"name": "a5_underpass", "what": "A5 near Heidelberg: the autobahn over an underpass (Earth drivability site)", "at": [49.35458, 8.63166], "radius": 60},
-    {"name": "perth_interchange", "what": "Perth: a freeway interchange (Earth interchange site)", "at": [-31.889125, 115.91902], "radius": 80}
+    {"name": "perth_interchange", "what": "Perth: a freeway interchange (Earth interchange site)", "at": [-31.889125, 115.91902], "radius": 80},
+    {"name": "dallas_high_five", "what": "Dallas: the High Five, I-635 and US 75 on five levels, 37 m up (complex interchanges' list)", "at": [32.9238888, -96.7631401], "radius": 120},
+    {"name": "la_pregerson", "what": "Los Angeles: the Judge Harry Pregerson Interchange, I-105 and I-110, with HOV and transit levels (complex interchanges' list)", "at": [33.9287457, -118.2809393], "radius": 120},
+    {"name": "birmingham_gravelly_hill", "what": "Birmingham: Gravelly Hill (Spaghetti Junction), the M6 and A38(M) over a canal and a railway (complex interchanges' list)", "at": [52.513, -1.8665], "radius": 120},
+    {"name": "shanghai_yanan_puxi", "what": "Shanghai: the Yan'an Elevated Road over the North-South Elevated Road in Puxi, stacked city viaducts (complex interchanges' list)", "at": [31.2264545, 121.4648755], "radius": 120},
+    {"name": "kawazu_nanadaru_loop", "what": "Kawazu: the Nanadaru Loop Bridge, a double spiral climbing a valley over itself (complex interchanges' list)", "at": [34.7915774, 138.93866], "radius": 100}
   ]
 }
