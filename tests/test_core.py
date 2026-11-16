@@ -599,6 +599,29 @@ def test_a_finished_loop_lets_the_markers_follow_the_anchor_again(lua):
     assert abs(after) < 2000 and after != before
 
 
+def test_a_loop_with_no_road_section_back_ends_at_its_stage_finish_not_at_the_start_s_stall(lua):
+    launched(lua)
+    lua.execute("core.onAnyMissionChanged('started', MISSION)")
+    assert logs(lua, "ends at its own end stall")             # (the testbed's stage ends some 24 km from its service park)
+    start = (lua.eval("MISSION.missionTypeData.serviceStallPos[1]"), lua.eval("MISSION.missionTypeData.serviceStallPos[2]"))
+    lua.execute("""
+RM = { schedule = { { missionType = 'serviceIn', serviceStallPos = {0, 0, 0} } }, events = { { type = 'service_in', pos = {0, 0, 0} } } }
+CUR = 'beamng_earth/rallyRoadSection/earthrally-testbed-road1'
+function RM.getCurrentMissionId(self) return CUR end
+gameplay_rallyLoop = { getManager = function() return RM end }
+""")
+    lua.execute("core.onUpdate(2)")
+    assert (lua.eval("MISSION.missionTypeData.serviceStallPos[1]"), lua.eval("MISSION.missionTypeData.serviceStallPos[2]")) == start
+    lua.execute("CUR = 'beamng_earth/rallyStage/earthrally-testbed-ss1'")   # on the stage: the loop goes into service at its finish
+    lua.execute("core.onUpdate(2)")
+    end_pos = (lua.eval("MISSION.missionTypeData.serviceStallPos[1]"), lua.eval("MISSION.missionTypeData.serviceStallPos[2]"))
+    assert abs(end_pos[0] - start[0]) + abs(end_pos[1] - start[1]) > 5000
+    assert lua.eval("RM.schedule[1].serviceStallPos[1]") == end_pos[0] and lua.eval("RM.events[1].pos[1]") == end_pos[0]
+    # stopped there: a loop of its own has no day to finish
+    lua.execute("CUR = 'serviceIn'; core.onAnyMissionWillChange('stopped', MISSION, false)")
+    assert not logs(lua, "the day is")
+
+
 def test_a_held_loading_screen_never_outlives_the_level_or_a_failed_start(lua):
     lua.execute("core.onExtensionLoaded()")
     lua.execute("LEVEL = nil; EARTH_IN_LEVEL = false")
