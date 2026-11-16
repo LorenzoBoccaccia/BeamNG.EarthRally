@@ -159,3 +159,19 @@ def test_the_eval_reports_a_check_that_grew_as_worse(tmp_path):
     table = ee.write_report([res], A)
     assert "| x | **worse**, same |" in table and "**2 → 3**" in table and "| 1 → 0 |" in table
     assert ee.verdict_line(res).startswith("WORSE, same")
+
+
+def test_both_eval_sides_wait_for_the_lidar(tmp_path, monkeypatch):
+    """A cold place's lidar fetched during one side's build (Boston's Bowker, 2026-11-16): both sides wait for it."""
+    import earth_eval as ee
+    seen = []
+
+    class R:
+        returncode = 0
+    monkeypatch.setattr(ee.subprocess, "run", lambda cmd, stdout=None, stderr=None, env=None, cwd=None: seen.append(env) or R())
+
+    class A:
+        out, image, views, reuse, online, no_buildings, cache = str(tmp_path), "10x10", "top", False, False, False, None
+    for side in ee.SIDES:
+        ee.build_side({"name": "j", "at": [1.0, 2.0]}, side, "tree", A, lambda m: None)
+    assert [e["BNE_LIDAR_GAPS_WAIT"] for e in seen] == [ee.LIDAR_WAIT_S] * 2

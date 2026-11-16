@@ -51,6 +51,7 @@ PANEL = "520x360"               # one view's pixels in the eval picture
 SIDES = ("before", "after")
 GROUPS = {"ground": (ev.GROUND, ev.MOVED), "road": (ev.ROAD,), "deck": (ev.DECK,), "rail": (ev.RAIL,)}
 UP_RGB, DOWN_RGB, KIND_RGB, SAME_RGB = (0.85, 0.1, 0.1), (0.1, 0.25, 0.9), (0.45, 0.45, 0.45), (1.0, 1.0, 1.0)
+LIDAR_WAIT_S = "900"            # s each side may wait for a place's lidar (build_side)
 DIFF_FULL_M = 2.0               # m of rise or fall drawn at the full colour
 
 
@@ -90,7 +91,10 @@ def build_side(j, side, tree, a, log):
             cmd.append("--" + flag.replace("_", "-"))
     if a.cache:
         cmd += ["--cache", a.cache]
-    env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off")
+    # (both sides built under the same conditions: Earth plans a place without its lidar when the lidar's read takes
+    # longer than BNE_LIDAR_GAPS_WAIT (8 s), and the first side to build a cold place fetched it while the second found it
+    # cached: Boston's Bowker "fell" 4-6 m between two identical trees. The wait pre-cache uses, so neither side gives up)
+    env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off", BNE_LIDAR_GAPS_WAIT=LIDAR_WAIT_S)
     t = time.time()
     with open(os.path.join(out, "view.log"), "w", encoding="utf-8") as f:
         r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
