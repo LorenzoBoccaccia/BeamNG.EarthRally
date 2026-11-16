@@ -14,6 +14,10 @@ one directional (Lambert) light and a little ambient light, in flat colours:
   blue-grey   tunnel tubes and portals
   green       sidewalks;  orange: median barriers   (--kinds adds the rest: signs, wires, the collision meshes)
   dark line   the stage line (--geometry, repeatable); blue needle: the point
+  cyan        reference trucks, 4 m high (every TRUCK_EVERY_M along every road and road deck; on a road with a height limit
+              (the map's maxheight, Earth's roads.height_limit_lines) as high as the sign, a pickup under PICKUP_BELOW_M), and
+              violet: reference wagons, 4.3 m high, nose to tail along every railway: what clears an underpass and what
+              doesn't shows (--no-vehicles: none)
 
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
@@ -56,9 +60,10 @@ BLOCK_STEP = 128            # a block's centre is a multiple of this (m)
 TILE = 256.0                # roads.TILE: an anchor road tile's side (m)
 
 # ---- classes: what a triangle is, its debug colour, its name in the legend ---------------------------------------------------
-GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER = range(10)
+GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON = range(12)
 CLASS_NAME = ["ground", "ground moved by the rally grader", "road", "bridge deck", "rail", "building", "tunnel tube / portal",
-              "sidewalk", "median barrier", "other mesh (--kinds)"]
+              "sidewalk", "median barrier", "other mesh (--kinds)", "reference truck, 4 m high (a signed limit: its height)",
+              "reference wagon, 4.3 m high"]
 CLASS_RGB = np.array([
     (0.55, 0.38, 0.22),     # ground: brown
     (1.00, 0.00, 1.00),     # moved by the grader: magenta
@@ -70,6 +75,8 @@ CLASS_RGB = np.array([
     (0.50, 0.80, 0.42),     # sidewalk: green
     (1.00, 0.55, 0.10),     # barrier: orange
     (0.70, 0.55, 0.90),     # anything else: lilac
+    (0.10, 0.80, 0.85),     # reference truck: cyan
+    (0.45, 0.25, 0.75),     # reference wagon: violet
 ])
 KIND_CLASS = {"road": ROAD, "deck": DECK, "rail": RAIL, "bld": BUILDING, "b3dmr": BUILDING, "tunnel": TUNNEL, "walk": WALK,
               "barrier": BARRIER}
@@ -366,6 +373,168 @@ def surface_grid(tris, cls, box, step=SURFACE_STEP_M):
     c[hit] = cls[tri[hit]]
     z[hit] = top - (zbuf[hit] + b[tri[hit]])
     return c[::-1].copy(), z[::-1].copy()
+
+
+# ---- reference vehicles: a full-height truck along every road, wagons along every railway --------------------------------
+TRUCK_LWH = (12.0, 2.55, 4.0)       # m long, wide, high: a full-height truck (the EU's 4 m)
+WAGON_LWH = (20.0, 3.0, 4.3)        # m: a full-height wagon (UIC's 4.32 m loading gauge over the rail)
+TRUCK_EVERY_M = 20.0                # m between the trucks' middles along a road
+WAGON_EVERY_M = 21.0                # m between the wagons' middles (nose to tail, 1 m apart)
+NEIGH_M = 12.0                      # m round a truck: the surface whose triangles give its middle, heading and slope (a
+                                    # 7 m road read 8 m round its end was near square: its heading turned 15 deg)
+LEVEL_M = 2.0                       # m apart in height: another level (the road under a deck)
+MIN_NEIGH = 6                       # surface triangles round a place for a vehicle there
+RAIL_NEIGH_M = 4.5                  # m round a wagon: one track of a double line (their middles ~4.5 m apart)
+UP_NZ = 0.8                         # a face whose normal is this near vertical is a surface a vehicle stands on (not an
+                                    # abutment's wall, a parapet, a kerb's face: they turned wagons across the track)
+PICKUP_LWH = (5.5, 2.0)             # m long, wide: the vehicle on a road signed under PICKUP_BELOW_M (as high as the sign)
+PICKUP_BELOW_M = 2.5                # m: a height limit under this is a pickup's or a van's road, not a truck's
+LIMIT_NEAR_M = 5.0                  # m from a height limit's line a truck takes its height
+
+
+def box_triangles(base, axis, L, W, H):
+    """The 12 triangles (12, 3, 3) of a box standing on base (the middle of its bottom), its length along axis (unit; may slope),
+    its height square to that and to the horizontal side."""
+    ax = np.asarray(axis, np.float64)
+    ax = ax / np.linalg.norm(ax)
+    side = np.cross((0.0, 0.0, 1.0), ax)
+    n = np.linalg.norm(side)
+    side = side / n if n > 1e-9 else np.array([0.0, 1.0, 0.0])
+    up = np.cross(ax, side)
+    b = np.asarray(base, np.float64)
+    c = np.array([[b + i * L / 2 * ax + j * W / 2 * side + k * H * up for k in (0, 1)] for i in (-1, 1) for j in (-1, 1)])
+    c = c.reshape(2, 2, 2, 3)                   # [i][j][k]
+    v = lambda i, j, k: c[i, j, k]              # noqa: E731
+    quads = [(v(0, 0, 0), v(1, 0, 0), v(1, 1, 0), v(0, 1, 0)), (v(0, 0, 1), v(1, 0, 1), v(1, 1, 1), v(0, 1, 1)),
+             (v(0, 0, 0), v(1, 0, 0), v(1, 0, 1), v(0, 0, 1)), (v(0, 1, 0), v(1, 1, 0), v(1, 1, 1), v(0, 1, 1)),
+             (v(0, 0, 0), v(0, 1, 0), v(0, 1, 1), v(0, 0, 1)), (v(1, 0, 0), v(1, 1, 0), v(1, 1, 1), v(1, 0, 1))]
+    return np.array([t for a, b_, c_, d in quads for t in ((a, b_, c_), (a, c_, d))], np.float64)
+
+
+def _buckets(P, size):
+    keys = np.floor(P[:, :2] / size).astype(np.int64)
+    out = {}
+    for i, k in enumerate(map(tuple, keys)):
+        out.setdefault(k, []).append(i)
+    return {k: np.array(v, np.int64) for k, v in out.items()}
+
+
+def _near(P, buckets, size, p, reach, level):
+    kx, ky = int(math.floor(p[0] / size)), int(math.floor(p[1] / size))
+    r = int(math.ceil(reach / size))
+    idx = [buckets[(kx + dx, ky + dy)] for dx in range(-r, r + 1) for dy in range(-r, r + 1) if (kx + dx, ky + dy) in buckets]
+    if not idx:
+        return np.zeros(0, np.int64)
+    idx = np.concatenate(idx)
+    d = P[idx] - p
+    return idx[(np.hypot(d[:, 0], d[:, 1]) <= reach) & (np.abs(d[:, 2]) <= level)]
+
+
+def place_vehicles(tris, every, lwh, top=False, level=LEVEL_M, neigh=NEIGH_M):
+    """Boxes of lwh (long, wide, high) along the surface triangles tris (n, 3, 3), their middles every metres apart on each level:
+    each on the middle of the surface triangles within neigh metres round a triangle no box is near yet (in the triangles' own
+    order: deterministic), along their principal axis (the road's or the track's heading and grade), on their median height
+    (top: their highest, the rails' heads over the ballast). Returns [(base (3,), axis (3,))]."""
+    if not len(tris):
+        return []
+    C = tris.mean(axis=1)
+    cb = _buckets(C, neigh)
+    placed = np.zeros((0, 3))
+    pb = {}
+    out = []
+    for i in np.lexsort((C[:, 1], C[:, 0])):
+        p = C[i]
+        if len(placed) and len(_near(placed, pb, every, p, every * 0.75, level)):
+            continue
+        q = C[_near(C, cb, neigh, p, neigh, level)]
+        if len(q) < MIN_NEIGH:
+            continue
+        m = q.mean(axis=0)
+        w, V = np.linalg.eigh(np.cov((q - m).T))
+        axis = V[:, -1]
+        if abs(axis[2]) > 0.5:                      # (not a road: a wall, a ramp's side)
+            continue
+        if axis[0] < 0 or (axis[0] == 0 and axis[1] < 0):
+            axis = -axis
+        base = np.array([m[0], m[1], float(q[:, 2].max() if top else np.median(q[:, 2]))])
+        if len(placed) and len(_near(placed, pb, every, base, every * 0.75, level)):
+            continue
+        out.append((base, axis))
+        placed = np.vstack([placed, base])
+        pb = _buckets(placed, every)
+    return out
+
+
+def _dist_to_line(p, line):
+    a, b = line[:-1], line[1:]
+    ab = b - a
+    t = np.clip(((p - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+    return float(np.hypot(*(a + ab * t[:, None] - p).T).min()) if len(a) else math.inf
+
+
+def limit_at(limits, xy, reach=LIMIT_NEAR_M):
+    """m: the lowest height limit whose line (in the frame) passes within reach of xy, or None."""
+    hs = [h for line, h in limits if len(line) >= 2 and _dist_to_line(np.asarray(xy, np.float64), line) <= reach]
+    return min(hs) if hs else None
+
+
+def reference_vehicles(tris, cls, limits=()):
+    """(triangles, classes) of the reference trucks along the roads and road decks (not a rail deck: a deck with the track on it)
+    and the wagons along the railways. limits: [(line (k, 2) in the frame, m)], the roads' height limits: a truck near one is as
+    high as it, a pickup under PICKUP_BELOW_M."""
+    up = np.abs(face_normals(tris)[:, 2]) >= UP_NZ if len(tris) else np.zeros(0, bool)
+    road = ((cls == ROAD) | (cls == DECK)) & up
+    rail = (cls == RAIL) & up
+    if road.any() and rail.any():           # (a deck under a track is the railway's)
+        R = tris[rail].mean(axis=1)
+        rb = _buckets(R, 4.0)
+        D = np.where(cls == DECK)[0]
+        for i in D:
+            c = tris[i].mean(axis=0)
+            near = _near(R, rb, 4.0, c + (0.0, 0.0, 1.0), 3.0, 1.6)
+            if len(near):
+                road[i] = False
+    T = []
+    for base, axis in place_vehicles(tris[road], TRUCK_EVERY_M, TRUCK_LWH):
+        h = limit_at(limits, base[:2]) if limits else None
+        if h is None:
+            T.append(box_triangles(base, axis, *TRUCK_LWH))
+        elif h < PICKUP_BELOW_M:
+            T.append(box_triangles(base, axis, *PICKUP_LWH, h))
+        else:
+            T.append(box_triangles(base, axis, TRUCK_LWH[0], TRUCK_LWH[1], h))
+    W = [box_triangles(base, axis, *WAGON_LWH) for base, axis in place_vehicles(tris[rail], WAGON_EVERY_M, WAGON_LWH, top=True,
+                                                                  neigh=RAIL_NEIGH_M)]
+    T = np.concatenate(T) if T else np.zeros((0, 3, 3))
+    W = np.concatenate(W) if W else np.zeros((0, 3, 3))
+    return np.concatenate([T, W]), np.array([TRUCK] * len(T) + [WAGON] * len(W), np.int8)
+
+
+def height_limits(a, frame, box, log):
+    """[(line (k, 2) in the frame, m)]: the roads' height limits round box (the map's maxheight: Earth's roads.height_limit_lines
+    of its map cells, not those lying on the road's own bridge); [] when Earth's map data can't be read."""
+    try:
+        bw = earth_state(a, log)
+        md = getattr(bw._s, "md", None)
+        if md is None:
+            return []
+        import mapcells
+        import roads
+        xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
+        la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
+        out = []
+        for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
+            feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
+            if feats is None:
+                continue
+            for ring, h in roads.height_limit_lines(feats, on_bridges=False):
+                ring = np.asarray(ring, np.float64)
+                e, n, _ = frame.geodetic_to_enu(ring[:, 1], ring[:, 0], 0.0)
+                out.append((np.stack([np.asarray(e, np.float64), np.asarray(n, np.float64)], axis=1), float(h)))
+        return out
+    except Exception as e:      # (the map data's absence only loses the signs: every truck 4 m high)
+        log(f"  height limits not read: {type(e).__name__}: {e}")
+        return []
 
 
 # ======================================================================================================================
@@ -721,6 +890,7 @@ def main():
     ap.add_argument("--image", default="960x640", help="one view's pixels, WxH (the views are put two per row, a title and "
                     "legend added around them)")
     ap.add_argument("--separate", action="store_true", help="also write each view as a picture of its own")
+    ap.add_argument("--no-vehicles", action="store_true", help="no reference trucks and wagons on the roads and railways")
     ap.add_argument("--dump", action="store_true", help="also write each view's map (<name>_panel_<view>.png) and the surface "
                     "grid (<name>_surface.npz) for tools/earth_eval.py")
     ap.add_argument("--label-prefix", default="", help="put before each view's label (earth_eval: \"before: \")")
@@ -783,6 +953,14 @@ def main():
         T.append(t)
         C.append(np.full(len(t), KIND_CLASS.get(kind, OTHER), np.int8))
     tris, cls = np.concatenate(T), np.concatenate(C)
+    surface = (tris, cls)           # (the surface grid: without the vehicles)
+    if not a.no_vehicles:
+        limits = height_limits(a, frame, box, log)
+        if limits:
+            log(f"  height limits: " + ", ".join(f"{h:g} m" for h in sorted({h for _l, h in limits})))
+        vt, vc = reference_vehicles(tris, cls, limits)
+        log(f"  reference vehicles: {int((vc == TRUCK).sum()) // 12} trucks, {int((vc == WAGON).sum()) // 12} wagons")
+        tris, cls = np.concatenate([tris, vt]), np.concatenate([cls, vc])
     log(f"  ground: {int((cls <= MOVED).sum())} triangles; total {len(tris)}")
     pz = float(bilinear(z, x0, y0, px, py))
     lines = stage_lines(a.geometry, frame, z, x0, y0, box, a.line_z)
@@ -816,7 +994,7 @@ def main():
     compose(panels, title, sub, legend_entries(sorted(used_all), bool(lines), True)).save(path)
     log(f"wrote {path}")
     if a.dump:
-        c, zs = surface_grid(tris, cls, box)
+        c, zs = surface_grid(*surface, box)
         path = os.path.join(a.out, f"{a.name}_surface.npz")
         np.savez_compressed(path, cls=c, z=zs, box=np.array(box, np.float64), step=np.float64(SURFACE_STEP_M),
                             point=np.array([px, py, pz]), used=np.array(sorted(used_all), np.int64),

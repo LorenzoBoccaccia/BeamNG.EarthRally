@@ -55,6 +55,12 @@ def test_a_deck_lowered_is_changed_and_measured():
     assert abs(r["deck"]["max"] - 1.5) < 1e-6 and r["road"]["max"] < 1e-6
 
 
+def test_a_small_move_is_minor_not_changed():
+    r = ee.compare(grids(), grids(deck_z=4.1))
+    assert r["verdict"] == "minor" and not r["changed"]
+    assert ee.compare(grids(), grids())["verdict"] == "same"
+
+
 def test_a_deck_gone_changes_what_the_surface_is():
     tris, cls = scene()
     after = ev.surface_grid(tris[:4], cls[:4], (-10, -10, 10, 10), step=0.5)

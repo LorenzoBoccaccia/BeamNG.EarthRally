@@ -16,7 +16,8 @@ per tree, Earth's plan cache off), then:
                         ground, the roads, the decks and the rails moved (max and 99th percentile, m)
   <out>/report.json     the same numbers
 
-A junction is "changed" when any sample changed what it is or moved more than SAME_M. --fail-on-change exits 1 when one did that
+A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
+moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did that
 is not in --expect (the junctions the change is about). --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
 """
@@ -36,6 +37,8 @@ sys.path.insert(0, HERE)
 import earth_view as ev  # noqa: E402
 
 SAME_M = 0.02                   # m a surface may move and still be the same (the height lattice's rounding)
+MINOR_M = 0.25                  # m ... and still be a minor change (a rebuild's noise, a smoothing pass)
+MINOR_KIND = 0.001              # the share of the surface that may change what it is in a minor change
 DEFAULT_SET = os.path.join(HERE, "junctions.json")
 PANEL = "520x360"               # one view's pixels in the eval picture
 SIDES = ("before", "after")
@@ -102,7 +105,14 @@ def compare(before, after, same_m=SAME_M):
     same_kind = (cb == ca) & np.isfinite(zb) & np.isfinite(za)
     if same_kind.any():
         moved = max(moved, float(np.abs(za[same_kind] - zb[same_kind]).max()))
-    out["changed"] = bool(out["kind_changed"] > 0.0 or moved > same_m)
+    out["moved"] = moved
+    if out["kind_changed"] == 0.0 and moved <= same_m:
+        out["verdict"] = "same"
+    elif out["kind_changed"] <= MINOR_KIND and moved <= MINOR_M:
+        out["verdict"] = "minor"
+    else:
+        out["verdict"] = "changed"
+    out["changed"] = out["verdict"] == "changed"
     return out
 
 
@@ -147,7 +157,7 @@ def key_panel(W, H, res):
     if res.get("error"):
         d.text((10, y), res["error"], fill=(200, 0, 0), font=f)
         return pic
-    d.text((10, y), ("CHANGED" if res["changed"] else "same") + f"; class changed on {100 * res['kind_changed']:.2f} % of it",
+    d.text((10, y), {"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") + f"; class changed on {100 * res['kind_changed']:.2f} % of it",
            fill=(200, 0, 0) if res["changed"] else (0, 120, 0), font=b)
     y += 30
     for g in GROUPS:
@@ -216,7 +226,7 @@ def write_report(results, a):
             rows.append(f"| {r['name']} | error: {r['error']} | | | | | |")
             continue
         g = r["ground"]
-        rows.append(f"| {r['name']} | {'**changed**' if r['changed'] else 'same'} | {100 * r['kind_changed']:.2f} % | "
+        rows.append(f"| {r['name']} | {'**changed**' if r['changed'] else r['verdict']} | {100 * r['kind_changed']:.2f} % | "
                     f"{g['max']:.2f} / {g['p99']:.2f} | " + " | ".join(
                         f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " |")
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
