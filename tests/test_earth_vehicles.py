@@ -111,3 +111,91 @@ def test_limit_at_takes_the_lowest_near():
     lines = [(np.array([[0.0, 0.0], [10.0, 0.0]]), 3.3), (np.array([[0.0, 2.0], [10.0, 2.0]]), 2.5),
              (np.array([[0.0, 50.0], [10.0, 50.0]]), 1.0)]
     assert ev.limit_at(lines, (5.0, 1.0)) == 2.5 and ev.limit_at(lines, (5.0, 20.0)) is None
+
+
+# ---- along Earth's map lines -------------------------------------------------------------------------------------------------
+def test_surfaces_give_every_height_under_a_point():
+    tris = np.concatenate([strip(0, 10, 0, 10, 1.0), strip(0, 10, 0, 10, 7.5)])
+    s = ev.Surfaces(tris)
+    assert np.allclose(s.heights(5.2, 5.7), [1.0, 7.5]) and not len(s.heights(20.0, 5.0))
+    assert ev.levels(np.array([1.0, 1.4, 7.5])) == [1.2, 7.5] and ev.levels(np.array([1.0, 1.4]), top=True) == [1.4]
+
+
+def test_along_spaces_points_from_half_a_step():
+    pts = ev.along(np.array([[0.0, 0.0], [100.0, 0.0]]), 20.0)
+    assert [round(float(p[0]), 6) for p, _t, _f in pts] == [10.0, 30.0, 50.0, 70.0, 90.0]
+    assert np.allclose(pts[0][1], [1.0, 0.0]) and abs(pts[2][2] - 0.5) < 1e-9
+
+
+def scene_road_under_deck():
+    ground_road = strip(-60, 60, -3.5, 3.5, 0.0)                                       # (along x)
+    deck = strip(-4, 4, -40, 40, 7.0)                                                  # (along y, over it)
+    deck_road = strip(-4, 4, -60, -40, 0.0)                                            # (its approaches, simplified flat)
+    tris = np.concatenate([ground_road, deck, deck_road])
+    cls = np.array([ev.ROAD] * len(ground_road) + [ev.DECK] * len(deck) + [ev.ROAD] * len(deck_road), np.int8)
+    return tris, cls
+
+
+def test_trucks_follow_their_own_line_on_both_levels():
+    tris, cls = scene_road_under_deck()
+    lines = {"road": [(np.array([[-60.0, 0.0], [60.0, 0.0]]), []),                      # the road under: ground
+                      (np.array([[0.0, -40.0], [0.0, 40.0]]), [(0.0, 1.0, "bridge")])],   # the deck over it
+             "rail": []}
+    t, c = ev.reference_vehicles(tris, cls, lines=lines, ground=lambda x, y: 0.0)
+    b = boxes(t[c == ev.TRUCK])
+    mid, bottom = b.mean(axis=(1, 2)), b[..., 2].min(axis=(1, 2))
+    under = np.abs(mid[:, 1]) < 1.0
+    over = np.abs(mid[:, 0]) < 1.0
+    assert under.sum() >= 4 and np.allclose(bottom[under & ~over], 0.0)                 # the ground road's on the ground ...
+    assert over.sum() >= 3 and np.allclose(bottom[over & ~under], 7.0)                  # ... the deck's on the deck
+    assert np.all(np.ptp(b[under & ~over][..., 0], axis=(1, 2)) > 11)                  # heading along x
+    assert np.all(np.ptp(b[over & ~under][..., 1], axis=(1, 2)) > 11)                  # heading along y
+
+
+def test_a_ground_road_stands_on_the_terrain_and_an_under_road_never_on_the_overpass():
+    """Earth paints ground roads into the terrain: the road under a deck has only its edges as meshes. Its trucks stand on
+    the terrain even where the terrain under the deck reads high (an approach's fill), never on the deck over it."""
+    tris, cls = scene_road_under_deck()
+    lines = {"road": [(np.array([[-60.0, 0.0], [60.0, 0.0]]), [])], "rail": []}
+    fill = lambda x, y: 6.5 if abs(x) < 6 else 0.0                                      # noqa: E731 (the deck's fill)
+    deck = cls == ev.DECK
+    ground = strip(-60, 60, -20, 20, 0.0)                                                # (the view: the ground's extent)
+    tris = np.concatenate([tris[deck], ground])
+    cls = np.array([ev.DECK] * int(deck.sum()) + [ev.GROUND] * len(ground), np.int8)
+    b = boxes(ev.reference_vehicles(tris, cls, lines=lines, ground=fill)[0])
+    assert len(b) >= 5 and np.all(b[..., 2].min(axis=(1, 2)) < 6.6)                   # (never on the deck at 7)
+
+
+def test_a_bridge_with_no_deck_drawn_gets_red_posts_and_a_ground_road_none():
+    road = strip(0, 100, -3.5, 3.5, 0.2)
+    deck = np.concatenate([strip(0, 40, -3.5, 3.5, 6.0), strip(70, 100, -3.5, 3.5, 6.0)])     # (a 30 m hole)
+    tris = np.concatenate([deck, road])
+    cls = np.array([ev.DECK] * len(deck) + [ev.ROAD] * len(road), np.int8)
+    bridge = {"road": [(np.array([[0.0, 0.0], [100.0, 0.0]]), [(0.0, 1.0, "bridge")])], "rail": []}
+    t, c = ev.reference_vehicles(tris, cls, lines=bridge, ground=lambda x, y: 0.0)
+    posts = boxes(t[c == ev.MISSING]).mean(axis=(1, 2))
+    assert len(posts) == 6 and np.all((posts[:, 0] > 40) & (posts[:, 0] < 70))
+    ground_road = {"road": [(np.array([[0.0, 0.0], [100.0, 0.0]]), [])], "rail": []}
+    t, c = ev.reference_vehicles(tris, cls, lines=ground_road, ground=lambda x, y: 0.0)
+    assert not (c == ev.MISSING).any()                                                   # (painted into the terrain)
+
+
+def test_a_truck_stands_at_every_crossing_under_a_bridge_or_a_railway():
+    ground_road = strip(-60, 60, -3.5, 3.5, 0.0)
+    deck = strip(-4, 4, -40, 40, 7.0)
+    ground = strip(-60, 60, -40, 40, 0.0)
+    tris = np.concatenate([ground_road, deck, ground])
+    cls = np.array([ev.ROAD] * len(ground_road) + [ev.DECK] * len(deck) + [ev.GROUND] * len(ground), np.int8)
+    under = np.array([[-60.0, 0.0], [60.0, 0.0]])
+    lines = {"road": [(under, []), (np.array([[0.0, -40.0], [0.0, 40.0]]), [(0.0, 1.0, "bridge")])], "rail": []}
+    b = boxes(ev.reference_vehicles(tris, cls, lines=lines, ground=lambda x, y: 0.0)[0])
+    mid, bottom = b.mean(axis=(1, 2)), b[..., 2].min(axis=(1, 2))
+    at = (np.hypot(mid[:, 0], mid[:, 1]) < 0.5) & np.isclose(bottom, 0.0)
+    assert at.sum() == 1                                                                 # the probe, under the deck
+    assert ev.crossings_under(under, [(np.array([[0.0, -40.0], [0.0, 40.0]]), [], False)]) == []    # (a ground road: no)
+    assert ev.crossings_under(under, [(np.array([[0.0, -40.0], [0.0, 40.0]]), [], True)]) == [0.5]  # (a railway: yes)
+
+
+def test_a_short_tunnel_is_open_ground_a_long_one_is_not():
+    assert ev._kind([(0.4, 0.5, "tunnel")], 0.45, 100.0) is None
+    assert ev._kind([(0.0, 0.8, "tunnel")], 0.45, 100.0) == "tunnel"
