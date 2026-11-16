@@ -746,7 +746,10 @@ end
 local function guideSet(g, gm, p, tgt, off)
   local x, y, z = tgt.x, tgt.y, tgt.z
   if tgt.final then x, y, z = guide.pointAt(g.line, g.line.total - guide.FINAL_BEFORE_M) end
-  local list = { vec3(x, y, z or p[3]) }
+  -- (the target on the game's ground: the line's heights are an old coarse terrain's, up to 10 m over a road in a cutting
+  -- the line knows nothing of, and the planner's last leg runs straight up to the target: the arrows climbed off the road)
+  z = groundAt(x, y, z) or z or p[3]
+  local list = { vec3(x, y, z) }
   local options = {}
   for k, v in pairs(guide.PLANNER) do options[k] = v end
   gm.setPath(list, options)
