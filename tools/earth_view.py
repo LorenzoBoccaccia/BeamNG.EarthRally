@@ -25,13 +25,18 @@ one directional (Lambert) light and a little ambient light, in flat colours:
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
 
-  <name>.png                every view in one picture, two per row (one snapshot per point, for reading by a person or an LLM):
+  <name>.png                every view in one picture, two per row, three for five or six views (one snapshot per point, for
+                            reading by a person or an LLM):
+                            overview  the area, 1 km x 1 km (OVERVIEW_M each side of the point), straight down, north up:
+                                      the block's ground in relief, the map's roads (their bridges wider, their tunnels thin)
+                                      and railways drawn on it, the close-up's box and the point in black
                             top    straight down, north up
                             <dir>  oblique (--elev degrees above the horizon), the camera on the compass side <dir> looking at
-                                   the point (--views top,SW,SE,N by default: any of N NE E SE S SW W NW or a bearing in degrees)
-  <name>_top.png, <name>_from_<dir>.png   each view on its own as well (--separate)
-  <name>_panel_<view>.png, <name>_surface.npz   (--dump, for tools/earth_eval.py) each view's map as drawn in the picture, and
-                            the surface seen from straight above every SURFACE_STEP_M: its class and height (surface_grid)
+                                   the point (--views overview,top,SW,SE,N by default: any of N NE E SE S SW W NW or a bearing)
+  <name>_overview.png, <name>_top.png, <name>_from_<dir>.png   each view on its own as well (--separate)
+  <name>_panel_<view>.png, <name>_surface.npz, <name>_overview.npz   (--dump, for tools/earth_eval.py) each view's map as
+                            drawn in the picture; the surface seen from straight above every SURFACE_STEP_M: its class and
+                            height (surface_grid); the overview's map before its labels and its ground under every pixel
 
 A picture has a title (the point, the radius, the Earth tree), a legend of the colours in it, and on each view its name, a
 scale bar and a north arrow. The default radius (40 m) frames a crossing, a deck end or a portal close up; --radius 120 for the
@@ -953,7 +958,8 @@ def parse_bearing(s):
 
 
 def view_name(s):
-    return "top" if s.strip().lower() == "top" else f"from_{s.strip().upper()}"
+    v = s.strip().lower()
+    return v if v in ("top", "overview") else f"from_{s.strip().upper()}"
 
 
 def _font(size):
@@ -1046,6 +1052,140 @@ def frame_picture(img, cam, title, subtitle, used, has_line, has_needle, extra_l
     legend below; a PIL image."""
     return compose([annotate_panel(img, cam, label)], title, subtitle,
                    legend_entries(used, has_line, has_needle, extra_legend), cols=1)
+
+
+# ======================================================================================================================
+# the overview: the area round the point from straight above, the map's lines on the block's ground
+# ======================================================================================================================
+OVERVIEW_M = 500.0          # m each side of the point the overview shows (1 km x 1 km)
+OVERVIEW_OUT_RGB = (0.80, 0.80, 0.80)       # outside the block (no ground built there)
+OVERVIEW_BOX_RGB = (0, 0, 0)                # the close-up's box and the point on the overview
+OVERVIEW_LINE_PX = {"road": 3, "bridge": 6, "tunnel": 2, "rail": 3}
+
+
+def is_overview(v):
+    return v.strip().lower() == "overview"
+
+
+def overview_camera(px, py, W, H, half=OVERVIEW_M):
+    """The top-down camera (north up) showing the square of half-side half round (px, py), whole, in a W x H image."""
+    return view_camera(np.array([px, py, 0.0]), 0.0, 90.0, W, H, scale=min(W, H) / (2.0 * half) * 0.98)
+
+
+def overview_heights(z, x0, y0, cam, half=OVERVIEW_M):
+    """The block's ground under every pixel of cam's image ((H, W), NaN outside the square of half-side half round the camera's
+    target or off the block)."""
+    W, H = cam.W, cam.H
+    xs = cam.target[0] + (np.arange(W) + 0.5 - W / 2.0) / cam.scale
+    ys = cam.target[1] - (np.arange(H) + 0.5 - H / 2.0) / cam.scale
+    X, Y = np.meshgrid(xs, ys)
+    zz = np.asarray(bilinear(z, x0, y0, X, Y), np.float64)
+    inside = (np.abs(X - cam.target[0]) <= half) & (np.abs(Y - cam.target[1]) <= half) & \
+        (X >= x0) & (X <= x0 + z.shape[1] - 1) & (Y >= y0) & (Y <= y0 + z.shape[0] - 1)
+    return np.where(inside, zz, np.nan)
+
+
+def overview_relief(zp, cam):
+    """The ground of the overview's pixels (zp (H, W) heights, NaN: none) in relief: the ground's colour, lighter high and darker
+    low over the square, shaded from the north-west; (H, W, 3 floats)."""
+    ok = np.isfinite(zp)
+    img = np.empty(zp.shape + (3,))
+    img[:] = OVERVIEW_OUT_RGB
+    if not ok.any():
+        return img
+    zf = np.where(ok, zp, float(np.nanmean(zp)))
+    m = 1.0 / cam.scale                                 # m per pixel
+    gy, gx = np.gradient(zf, m)                         # (rows run south: gy is -dz/dy)
+    nrm = np.stack([-gx, gy, np.ones_like(zf)], axis=-1)
+    nrm /= np.linalg.norm(nrm, axis=-1, keepdims=True)
+    L = np.array([-0.5, 0.5, 0.7])
+    lam = np.clip(nrm @ (L / np.linalg.norm(L)), 0.0, 1.0)
+    lo, hi = np.nanpercentile(zp, 2), np.nanpercentile(zp, 98)
+    t = np.clip((zf - lo) / max(hi - lo, 1.0), 0.0, 1.0)[..., None]
+    base = np.asarray(CLASS_RGB[GROUND]) * (0.75 + 0.6 * t)
+    lit = np.clip(base * (0.45 + 0.75 * lam[..., None]), 0.0, 1.0)
+    img[ok] = lit[ok]
+    return img
+
+
+def _level(ranges, f):
+    """"bridge", "tunnel" or None at fraction f of a line, short tunnels included (the overview draws every mapped tunnel)."""
+    for a, b, k in ranges:
+        if a <= f <= b:
+            return k
+    return None
+
+
+def _level_runs(xy, ranges, cam):
+    """[(level, pixel points)] of a map line in cam's image, cut where its level changes (sampled every 2 m)."""
+    L = _length(xy)
+    if L <= 0:
+        return []
+    cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))])
+    s = np.unique(np.concatenate([np.arange(0.0, L, 2.0), [L], cum]))
+    P = np.stack([np.interp(s, cum, xy[:, 0]), np.interp(s, cum, xy[:, 1]), np.zeros(len(s))], axis=1)
+    k = [_level(ranges, v / L) for v in s]
+    sx, sy, _ = cam.project(P)
+    out, start = [], 0
+    for i in range(1, len(s) + 1):
+        if i == len(s) or k[i] != k[start]:
+            pts = [(float(sx[j]), float(sy[j])) for j in range(start, min(i + 1, len(s)))]
+            if len(pts) >= 2:
+                out.append((k[start], pts))
+            start = i
+    return out
+
+
+def overview_lines(img, cam, lines):
+    """img (H, W, 3 floats) with the map's lines on it: roads pink, their bridges wider in the deck's colour, their tunnels thin
+    blue-grey, railways yellow edged dark; a PIL image."""
+    from PIL import Image, ImageDraw
+    pic = Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8))
+    d = ImageDraw.Draw(pic)
+    c = lambda k: tuple(int(v * 255) for v in CLASS_RGB[k])     # noqa: E731
+    road_rgb = {None: c(ROAD), "bridge": c(DECK), "tunnel": c(TUNNEL)}
+    for kind in ("road", "rail"):
+        for xy, ranges in (lines or {}).get(kind, []):
+            for lev, pts in _level_runs(np.asarray(xy, np.float64), ranges, cam):
+                if kind == "rail":
+                    w = OVERVIEW_LINE_PX["bridge" if lev == "bridge" else "rail"]
+                    d.line(pts, fill=(40, 40, 40), width=w + 2)
+                    d.line(pts, fill=c(RAIL), width=w)
+                else:
+                    d.line(pts, fill=road_rgb[lev], width=OVERVIEW_LINE_PX[lev or "road"])
+    return pic
+
+
+def overview_picture(z, x0, y0, cam, lines, close_box, point):
+    """The overview's map (H, W, 3 floats): the ground in relief, the map's lines, the close-up's box and the point; and the
+    heights under its pixels (H, W)."""
+    from PIL import ImageDraw
+    zp = overview_heights(z, x0, y0, cam)
+    pic = overview_lines(overview_relief(zp, cam), cam, lines)
+    sq = np.asarray(pic).copy()                     # (the lines stop at the square's edge)
+    (qx0, qx1), (qy0, qy1) = (np.sort(v) for v in cam.project(np.array([[point[0] - OVERVIEW_M, point[1] - OVERVIEW_M, 0.0],
+                                                                         [point[0] + OVERVIEW_M, point[1] + OVERVIEW_M, 0.0]]))[:2])
+    cols, rows = np.arange(cam.W) + 0.5, np.arange(cam.H) + 0.5
+    out = ~(((rows >= qy0) & (rows <= qy1))[:, None] & ((cols >= qx0) & (cols <= qx1))[None, :])
+    sq[out] = (np.asarray(BACKGROUND) * 255 + 0.5).astype(np.uint8)
+    from PIL import Image
+    pic = Image.fromarray(sq)
+    d = ImageDraw.Draw(pic)
+    ink = OVERVIEW_BOX_RGB
+    bx, by, _ = cam.project(np.array([[close_box[0], close_box[1], 0.0], [close_box[2], close_box[3], 0.0]]))
+    d.rectangle([float(bx.min()) - 1, float(by.min()) - 1, float(bx.max()) + 1, float(by.max()) + 1], outline=ink, width=3)
+    sx, sy, _ = cam.project(np.array([point[0], point[1], 0.0]))
+    d.ellipse([float(sx) - 4, float(sy) - 4, float(sx) + 4, float(sy) + 4], fill=ink)
+    return np.asarray(pic, np.float64) / 255.0, zp
+
+
+def overview_legend():
+    """The overview's legend entries."""
+    c = lambda k: tuple(int(v * 255) for v in CLASS_RGB[k])     # noqa: E731
+    return [(c(ROAD), "overview: the map's road"), (c(DECK), "overview: its bridge"), (c(TUNNEL), "overview: its tunnel"),
+            (c(RAIL), "overview: the map's railway"),
+            (OVERVIEW_BOX_RGB, "overview: the close-up's box and the point"),
+            (tuple(int(v * 255) for v in OVERVIEW_OUT_RGB), "overview: off the block (no ground built)")]
 
 
 # ======================================================================================================================
@@ -1247,10 +1387,12 @@ def main():
     ap.add_argument("--rally", action="store_true", help="run EarthRally's ground grader (rally_grader.py) on the block along the "
                                                          "--geometry stages and colour the ground it moves magenta")
     ap.add_argument("--rally-edition", help="the edition's legs.json, for its shaping limits")
-    ap.add_argument("--views", default="top,SW,SE,N", help="comma list: top, compass points or bearings (camera side); default top,SW,SE,N")
+    ap.add_argument("--views", default="overview,top,SW,SE,N",
+                    help="comma list: overview (1 km round the point, from above), top, compass points or bearings (camera side); "
+                         "default overview,top,SW,SE,N")
     ap.add_argument("--elev", type=float, default=35.0, help="the oblique cameras' elevation above the horizon (deg)")
-    ap.add_argument("--image", default="960x640", help="one view's pixels, WxH (the views are put two per row, a title and "
-                    "legend added around them)")
+    ap.add_argument("--image", default="960x640", help="one view's pixels, WxH (the views are put two per row, three "
+                    "for five or six views, a title and legend added around them)")
     ap.add_argument("--separate", action="store_true", help="also write each view as a picture of its own")
     ap.add_argument("--no-vehicles", action="store_true", help="no reference trucks and wagons on the roads and railways")
     ap.add_argument("--dump", action="store_true", help="also write each view's map (<name>_panel_<view>.png) and the surface "
@@ -1339,8 +1481,27 @@ def main():
     corners = np.array([[box[i], box[j], zz] for i in (0, 2) for j in (1, 3)
                         for zz in (float(tris[:, :, 2].min()), float(tris[:, :, 2].max()))])
     target = np.array([px, py, pz])
-    panels, used_all = [], set()
+    panels, used_all, extra = [], set(), []
     for v in (s for s in a.views.split(",") if s.strip()):
+        if is_overview(v):
+            cam = overview_camera(px, py, W, H)
+            ov_box = (px - OVERVIEW_M, py - OVERVIEW_M, px + OVERVIEW_M, py + OVERVIEW_M)
+            ov_lines, _ = map_lines(a, frame, ov_box, log, margin=0.0)
+            img, zp = overview_picture(z, x0, y0, cam, ov_lines, box, (px, py))
+            if not (x0 <= ov_box[0] and ov_box[2] <= x0 + z.shape[1] - 1 and y0 <= ov_box[1] and ov_box[3] <= y0 + z.shape[0] - 1):
+                log(f"  overview: part of the {2 * OVERVIEW_M:g} m square is off the block {blk}: drawn grey")
+            label = a.label_prefix + f"overview {2 * OVERVIEW_M / 1000:g} x {2 * OVERVIEW_M / 1000:g} km, north up; box: the close-up"
+            panels.append(annotate_panel(img, cam, label))
+            extra = overview_legend()
+            if a.dump:
+                panels[-1].save(os.path.join(a.out, f"{a.name}_panel_overview.png"))
+                np.savez_compressed(os.path.join(a.out, f"{a.name}_overview.npz"), img=(img * 255 + 0.5).astype(np.uint8),
+                                    z=zp.astype(np.float32), scale=np.float64(cam.scale), label=np.array(label))
+            if a.separate:
+                path = os.path.join(a.out, f"{a.name}_overview.png")
+                frame_picture(img, cam, title, sub, (), False, False, extra, label=label).save(path)
+                log(f"wrote {path}")
+            continue
         top = v.strip().lower() == "top"
         cam = view_camera(target, 0.0 if top else parse_bearing(v), 90.0 if top else a.elev, W, H)
         fit_camera(cam, corners)
@@ -1357,7 +1518,8 @@ def main():
     if not panels:
         sys.exit("--views names no view")
     path = os.path.join(a.out, f"{a.name}.png")
-    compose(panels, title, sub, legend_entries(sorted(used_all), bool(lines), True)).save(path)
+    compose(panels, title, sub, legend_entries(sorted(used_all), bool(lines), True, extra),
+            cols=3 if len(panels) in (5, 6) else 2).save(path)
     log(f"wrote {path}")
     if a.dump:
         c, zs = surface_grid(*surface, box)

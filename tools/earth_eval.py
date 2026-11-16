@@ -9,9 +9,12 @@ trees, one picture per junction and a report of what moved, so a change shows wh
 Each junction is built twice in its own folder (<out>/<name>/before, <out>/<name>/after; earth_view --dump, its own process
 per tree, Earth's plan cache off), then:
 
-  <out>/<name>.png      the before views in the top row, the after views under them, and on the right the change seen from
-                        straight above: red where the surface rose, blue where it fell, grey where something else is there
-                        (a road where the ground was, a deck gone), white where it is the same; with its key under it
+  <out>/<name>.png      3 x 2: the before views in the top row, the after views under them; by default the overview (1 km
+                        round the point from above, the after one tinted red where the ground rose and blue where it fell
+                        MINOR_M or more), the close-up from above and from the south-west; the verdict in the title
+  <out>/<name>_diff.png the close-up's change seen from straight above: red where the surface rose, blue where it fell, grey
+                        where something else is there (a road where the ground was, a deck gone), white where it is the same;
+                        and its key with the numbers
   <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, and how far the
                         ground, the roads, the decks and the rails moved (max and 99th percentile, m)
   <out>/report.json     the same numbers
@@ -168,28 +171,80 @@ def key_panel(W, H, res):
     return pic
 
 
+def load_overview(path):
+    """(map (H, W, 3 uint8), heights (H, W), scale px/m, label) of earth_view's <name>_overview.npz, or None."""
+    if not os.path.isfile(path):
+        return None
+    with np.load(path, allow_pickle=False) as f:
+        return f["img"], f["z"].astype(np.float64), float(f["scale"]), str(f["label"])
+
+
+def overview_change(img, zb, za, minor_m=MINOR_M):
+    """The after overview's map (H, W, 3 uint8) tinted where its ground rose (red) or fell (blue) minor_m or more since before."""
+    dz = np.where(np.isfinite(za) & np.isfinite(zb), za - zb, 0.0)
+    out = img.astype(np.float64) / 255.0
+    for mask, rgb in ((dz >= minor_m, UP_RGB), (dz <= -minor_m, DOWN_RGB)):
+        out[mask] = 0.35 * out[mask] + 0.65 * np.asarray(rgb)
+    return out
+
+
+def overview_panels(j, a, W, H):
+    """{side: the overview panel (PIL)}: each side's overview, the after one with the ground that moved tinted."""
+    got = {side: load_overview(os.path.join(a.out, j["name"], side, "view_overview.npz")) for side in SIDES}
+    out = {}
+    for side in SIDES:
+        o = got[side]
+        if o is None:
+            continue
+        img, z, scale, label = o
+        f = img.astype(np.float64) / 255.0
+        if side == "after" and got["before"] is not None and got["before"][1].shape == z.shape:
+            f = overview_change(img, got["before"][1], z)
+            label = f"after: overview 1 x 1 km; red: ground rose, blue: fell {MINOR_M:g} m+"
+        cam = ev.view_camera(np.zeros(3), 0.0, 90.0, img.shape[1], img.shape[0], scale)
+        out[side] = ev.annotate_panel(f, cam, label)
+    return out
+
+
+def verdict_line(res):
+    """The junction's result in a line: the verdict and how far each surface moved."""
+    if res.get("error"):
+        return "error: " + res["error"]
+    parts = [f"{g} up to {res[g]['max']:.2f} m" for g in GROUPS if res[g]["n"] and res[g]["max"] > SAME_M]
+    return ({"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
+            f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else ""))
+
+
 def eval_picture(j, a, res, log):
-    """<out>/<name>.png: before views over after views, the diff and its key on the right."""
+    """<out>/<name>.png: the before views over the after views (3 x 2 by default: overview, top, SW), the verdict in the title;
+    <out>/<name>_diff.png: the close-up's change from straight above and its key."""
     from PIL import Image
     W, H = (int(v) for v in a.image.lower().split("x"))
     views = [v.strip() for v in a.views.split(",") if v.strip()]
-    rows = []
+    ovs = overview_panels(j, a, W, H) if any(ev.is_overview(v) for v in views) else {}
+    grey = lambda: Image.new("RGB", (W, H), (230, 230, 230))    # noqa: E731
+    panels = []
     for side in SIDES:
         for v in views:
+            if ev.is_overview(v):
+                panels.append(ovs.get(side) or grey())
+                continue
             p = os.path.join(a.out, j["name"], side, f"view_panel_{ev.view_name(v)}.png")
-            rows.append(Image.open(p).convert("RGB") if os.path.isfile(p) else Image.new("RGB", (W, H), (230, 230, 230)))
-        if side == "before":
-            rows.append(Image.fromarray((res["_diff"] * 255 + 0.5).astype(np.uint8)) if "_diff" in res
-                        else Image.new("RGB", (W, H), (230, 230, 230)))
-        else:
-            rows.append(key_panel(W, H, res))
-    sub = f"before: {a.before}   after: {a.after}"
+            panels.append(Image.open(p).convert("RGB") if os.path.isfile(p) else grey())
+    sub = verdict_line(res) + f"      before: {os.path.basename(a.before)}   after: {os.path.basename(a.after)}"
     title = f"{j['name']}: {j.get('what', '')}"
     used = res.get("_used", [ev.GROUND, ev.ROAD])
-    pic = ev.compose(rows, title, sub, ev.legend_entries(used, bool(j.get("geometry")), True), cols=len(views) + 1)
+    extra = (ev.overview_legend() + [(tuple(int(c * 255) for c in UP_RGB), f"after overview: the ground rose {MINOR_M:g} m or more"),
+                                     (tuple(int(c * 255) for c in DOWN_RGB), f"after overview: the ground fell {MINOR_M:g} m or more")]
+             if ovs else [])
+    pic = ev.compose(panels, title, sub, ev.legend_entries(used, bool(j.get("geometry")), True, extra), cols=len(views))
     path = os.path.join(a.out, f"{j['name']}.png")
     pic.save(path)
     log(f"  wrote {path}")
+    diff = [Image.fromarray((res["_diff"] * 255 + 0.5).astype(np.uint8)) if "_diff" in res else grey(), key_panel(W, H, res)]
+    dpath = os.path.join(a.out, f"{j['name']}_diff.png")
+    ev.compose(diff, title + ": the close-up's change", f"before: {a.before}   after: {a.after}", [], cols=2).save(dpath)
+    log(f"  wrote {dpath}")
     return path
 
 
@@ -230,7 +285,7 @@ def write_report(results, a):
                     f"{g['max']:.2f} / {g['p99']:.2f} | " + " | ".join(
                         f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " |")
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
-          *rows, ""]
+          *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     with open(os.path.join(a.out, "report.json"), "w", encoding="utf-8") as f:
@@ -248,7 +303,8 @@ def main(argv=None):
     ap.add_argument("--at", type=ev.parse_pair, help="lat,lon of a point of its own instead of the set")
     ap.add_argument("--radius", type=float, default=40.0, help="m round --at")
     ap.add_argument("--name", default="point", help="--at's name")
-    ap.add_argument("--views", default="top,SW,SE,N")
+    ap.add_argument("--views", default="overview,top,SW", help="the picture's columns (earth_view's views); default "
+                    "overview,top,SW: 3 x 2 with before and after")
     ap.add_argument("--image", default=PANEL, help="one view's pixels, WxH")
     ap.add_argument("--reuse", action="store_true", help="draw from the data a former run left (no build)")
     ap.add_argument("--online", action="store_true", help="fetch the map data the cache lacks")
