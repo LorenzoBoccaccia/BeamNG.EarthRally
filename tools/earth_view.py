@@ -23,6 +23,8 @@ the game would load, closed solids included. A picture is an orthographic camera
                             <dir>  oblique (--elev degrees above the horizon), the camera on the compass side <dir> looking at
                                    the point (--views top,SW,SE,N by default: any of N NE E SE S SW W NW or a bearing in degrees)
   <name>_top.png, <name>_from_<dir>.png   each view on its own as well (--separate)
+  <name>_panel_<view>.png, <name>_surface.npz   (--dump, for tools/earth_eval.py) each view's map as drawn in the picture, and
+                            the surface seen from straight above every SURFACE_STEP_M: its class and height (surface_grid)
 
 A picture has a title (the point, the radius, the Earth tree), a legend of the colours in it, and on each view its name, a
 scale bar and a north arrow. The default radius (40 m) frames a crossing, a deck end or a portal close up; --radius 120 for the
@@ -338,6 +340,32 @@ def render(tris, cls, cam, lines=(), needle=None, ss=2, bias=DEPTH_BIAS_M, line_
         splat(img, cx[0] + 4.0 * ss * np.cos(t), cy[0] + 4.0 * ss * np.sin(t), NEEDLE_RGB, radius=max(1, ss // 2))
     out = img.reshape(cam.H, ss, cam.W, ss, 3).mean(axis=(1, 3)) if ss > 1 else img
     return out, used
+
+
+SURFACE_STEP_M = 0.5         # m between the samples of surface_grid
+
+
+def surface_grid(tris, cls, box, step=SURFACE_STEP_M):
+    """What is seen from straight above at every step metres of box (x0, y0, x1, y1): (class (H, W) int8, -1 where nothing;
+    height (H, W) m, NaN where nothing), by row = y, south first, a sample at the middle of its step square. The same z-buffer
+    as the pictures (the meshes lying on the ground win over it by the depth bias), so two trees' grids compare sample by
+    sample (tools/earth_eval.py)."""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    W, H = max(1, int(round((x1 - x0) / step))), max(1, int(round((y1 - y0) / step)))
+    cls = np.asarray(cls)
+    c = np.full((H, W), -1, np.int8)
+    z = np.full((H, W), np.nan)
+    if not len(tris):
+        return c, z
+    top = float(np.nanmax(tris[:, :, 2])) + 1.0
+    cam = Camera(((x0 + x1) / 2.0, (y0 + y1) / 2.0, top), (0.0, 0.0, -1.0), W, H, 1.0 / step)
+    sx, sy, d = cam.project(tris)
+    b = np.where(cls <= MOVED, 0.0, DEPTH_BIAS_M)
+    tri, zbuf = rasterize(np.stack([sx, sy], axis=-1), d - b[:, None], W, H)
+    hit = tri >= 0
+    c[hit] = cls[tri[hit]]
+    z[hit] = top - (zbuf[hit] + b[tri[hit]])
+    return c[::-1].copy(), z[::-1].copy()
 
 
 # ======================================================================================================================
@@ -693,6 +721,9 @@ def main():
     ap.add_argument("--image", default="960x640", help="one view's pixels, WxH (the views are put two per row, a title and "
                     "legend added around them)")
     ap.add_argument("--separate", action="store_true", help="also write each view as a picture of its own")
+    ap.add_argument("--dump", action="store_true", help="also write each view's map (<name>_panel_<view>.png) and the surface "
+                    "grid (<name>_surface.npz) for tools/earth_eval.py")
+    ap.add_argument("--label-prefix", default="", help="put before each view's label (earth_eval: \"before: \")")
     ap.add_argument("--ss", type=int, default=2, help="supersampling per axis (antialiasing)")
     ap.add_argument("--kinds", default=",".join(DEFAULT_KINDS),
                     help="mesh kinds drawn: " + ", ".join(DEFAULT_KINDS) + "; also wire, signs, bldcol, railcol, walkcol, buscol, ...")
@@ -770,8 +801,10 @@ def main():
         cam = view_camera(target, 0.0 if top else parse_bearing(v), 90.0 if top else a.elev, W, H)
         fit_camera(cam, corners)
         img, used = render(tris, cls, cam, lines=lines, needle=(px, py, pz, pz + 0.25 * a.radius), ss=a.ss, bias=a.bias)
-        label = "top-down, north up" if top else f"from {v.strip().upper()}, {a.elev:g} deg above the horizon"
+        label = a.label_prefix + ("top-down, north up" if top else f"from {v.strip().upper()}, {a.elev:g} deg above the horizon")
         panels.append(annotate_panel(img, cam, label))
+        if a.dump:
+            panels[-1].save(os.path.join(a.out, f"{a.name}_panel_{view_name(v)}.png"))
         used_all.update(int(u) for u in used)
         if a.separate:
             path = os.path.join(a.out, f"{a.name}_{view_name(v)}.png")
@@ -782,6 +815,13 @@ def main():
     path = os.path.join(a.out, f"{a.name}.png")
     compose(panels, title, sub, legend_entries(sorted(used_all), bool(lines), True)).save(path)
     log(f"wrote {path}")
+    if a.dump:
+        c, zs = surface_grid(tris, cls, box)
+        path = os.path.join(a.out, f"{a.name}_surface.npz")
+        np.savez_compressed(path, cls=c, z=zs, box=np.array(box, np.float64), step=np.float64(SURFACE_STEP_M),
+                            point=np.array([px, py, pz]), used=np.array(sorted(used_all), np.int64),
+                            title=np.array(title), subtitle=np.array(sub))
+        log(f"wrote {path}")
 
 if __name__ == "__main__":
     main()
