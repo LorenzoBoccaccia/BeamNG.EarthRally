@@ -386,7 +386,24 @@ LEVEL_M = 2.0                       # m apart in height: another level (the road
 MIN_NEIGH = 6                       # surface triangles round a place for a vehicle there
 RAIL_NEIGH_M = 4.5                  # m round a wagon: one track of a double line (their middles ~4.5 m apart)
 UP_NZ = 0.8                         # a face whose normal is this near vertical is a surface a vehicle stands on (not an
-                                    # abutment's wall, a parapet, a kerb's face: they turned wagons across the track)
+                                    # abutment's wall, a parapet, a kerb's face: they turned wagons across the track) ...
+                                    # ... and facing up (up_sign): a deck is a closed solid, and its underside, the girders'
+                                    # depth (~2.1 m) under its road, stood a second row of trucks hanging from it
+EARTH_UP_SIGN = -1.0                # Earth's .cdae winding: face_normals of its road surfaces point down (every flat face of
+                                    # the SR17's road mesh at Popoli); used where no road mesh tells (up_sign)
+
+
+def up_sign(tris, cls):
+    """+1 or -1: the sign of face_normals' z on the faces that look up, read from the road and sidewalk meshes (single surfaces,
+    all facing up: their majority), EARTH_UP_SIGN with none."""
+    m = (cls == ROAD) | (cls == WALK)
+    if not m.any():
+        return EARTH_UP_SIGN
+    nz = face_normals(tris[m])[:, 2]
+    flat = np.abs(nz) >= UP_NZ
+    if not flat.any():
+        return EARTH_UP_SIGN
+    return 1.0 if (nz[flat] > 0).sum() >= (nz[flat] < 0).sum() else -1.0
 PICKUP_LWH = (5.5, 2.0)             # m long, wide: the vehicle on a road signed under PICKUP_BELOW_M (as high as the sign)
 PICKUP_BELOW_M = 2.5                # m: a height limit under this is a pickup's or a van's road, not a truck's
 LIMIT_NEAR_M = 5.0                  # m from a height limit's line a truck takes its height
@@ -482,7 +499,7 @@ def reference_vehicles(tris, cls, limits=()):
     """(triangles, classes) of the reference trucks along the roads and road decks (not a rail deck: a deck with the track on it)
     and the wagons along the railways. limits: [(line (k, 2) in the frame, m)], the roads' height limits: a truck near one is as
     high as it, a pickup under PICKUP_BELOW_M."""
-    up = np.abs(face_normals(tris)[:, 2]) >= UP_NZ if len(tris) else np.zeros(0, bool)
+    up = face_normals(tris)[:, 2] * up_sign(tris, cls) >= UP_NZ if len(tris) else np.zeros(0, bool)
     road = ((cls == ROAD) | (cls == DECK)) & up
     rail = (cls == RAIL) & up
     if road.any() and rail.any():           # (a deck under a track is the railway's)
