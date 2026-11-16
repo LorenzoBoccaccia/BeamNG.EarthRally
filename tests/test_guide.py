@@ -347,10 +347,35 @@ def test_the_position_readout_names_the_liaison_line_too(run):
 
 def test_the_target_stands_on_the_games_ground_not_at_the_lines_height(run):
     # (Faro, 2026-11-16: the line's heights 10 m over the trunk in its cutting, the arrows climbing off the road to them)
-    run.execute("coverLine(0, 1400)")
+    # (the navgraph's nodes at the road's height, Earth's: the target is the node, on the road whatever the line's heights)
+    run.execute("coverLine(0, 1400); for _, nd in pairs(NODES) do nd.pos.z = nd.pos.z - 10 end")
     run.execute("core_terrain = { getTerrainHeight = function(p) return p.z - 10 end }")
     run.execute("gameRoutes(0)")
     want = run.eval("(select(3, guide.pointAt(ROAD, guide.along(ROAD, GM.endWP[1].x, GM.endWP[1].y, 0, ROAD.total))))") - 10
     assert run.eval("lastCall().wp[1].z") == pytest.approx(want, abs=0.5)
     run.execute("core_terrain = nil; GM_CALLS = {}; core.onNavgraphReloaded(); core.onUpdate(1.1)")
-    assert run.eval("lastCall().wp[1].z") == pytest.approx(want + 10, abs=0.5)      # (no ground yet: the line's own)
+    assert run.eval("lastCall().wp[1].z") == pytest.approx(want, abs=0.5)           # (no ground loaded: the node's still)
+
+
+def test_the_target_is_the_graphs_node_at_its_height_not_the_hill_over_a_tunnel(run):
+    # (the Fuji Subaru Line's snow shed, 2026-11-16: the terrain block is the hill over the tube, 5.6 m over its floor; Earth's
+    # navgraph has the road's own height, and the arrows climbed to the tube's roof when the target took the terrain's)
+    run.execute("coverLine(0, 1400)")
+    run.execute("for _, nd in pairs(NODES) do nd.pos.z = nd.pos.z - 7 end")             # (the road 7 m under the line's data)
+    run.execute("core_terrain = { getTerrainHeight = function(p) return p.z end }")      # (the hill: the line's heights)
+    run.execute("gameRoutes(0)")
+    wp = run.eval("lastCall().wp[1]")
+    node = run.eval("(function() local b, bd for _, nd in pairs(NODES) do local d = (nd.pos.x - GM.endWP[1].x)^2 + "
+                    "(nd.pos.y - GM.endWP[1].y)^2 if not bd or d < bd then b, bd = nd, d end end return b.pos end)()")
+    assert (wp.x, wp.y, wp.z) == pytest.approx((node.x, node.y, node.z), abs=0.01)     # (on the node, at its height)
+    assert 1300 < target_s(run) <= 1400
+
+
+def test_the_ground_under_a_known_road_height_is_the_road_not_the_hill_over_it(run):
+    # a car in a tunnel at 2277.8: the terrain block 2283.4 (the hill), the tube's floor 2277.4 under the car
+    run.execute("core_terrain = { getTerrainHeight = function(p) return 2283.4 end }")
+    run.execute("castRayStatic = function(o, d, len) local hit = o.z - 2277.4; if hit <= len then return hit end return len end")
+    assert run.eval("core.groundAt(10, 20, 2277.8, 2277.8)") == pytest.approx(2277.4, abs=0.01)
+    assert run.eval("core.groundAt(10, 20, 2277.8)") == pytest.approx(2283.4)          # (no road height: the terrain's)
+    run.execute("core_terrain = { getTerrainHeight = function(p) return 2278.6 end }")   # (in the open: the terrain is the road)
+    assert run.eval("core.groundAt(10, 20, 2277.8, 2277.8)") == pytest.approx(2278.6)

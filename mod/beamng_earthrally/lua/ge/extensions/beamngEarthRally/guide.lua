@@ -137,8 +137,9 @@ function M.target(line, s0, onGraph)
     if s - s0 > M.LOOKAHEAD_M then break end
     local x, y, z = M.pointAt(line, s)
     local final = s >= line.total - 1e-6
-    if onGraph(x, y) then
-      best, misses = { s = s, x = x, y = y, z = z, final = final }, 0
+    local on, node = onGraph(x, y)
+    if on then
+      best, misses = { s = s, x = x, y = y, z = z, final = final, node = node }, 0
     elseif best then
       misses = misses + 1
       if misses >= M.MISS_LIMIT then break end
