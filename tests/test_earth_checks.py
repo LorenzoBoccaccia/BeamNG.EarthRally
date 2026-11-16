@@ -175,3 +175,40 @@ def test_both_eval_sides_wait_for_the_lidar(tmp_path, monkeypatch):
     for side in ee.SIDES:
         ee.build_side({"name": "j", "at": [1.0, 2.0]}, side, "tree", A, lambda m: None)
     assert [e["BNE_LIDAR_GAPS_WAIT"] for e in seen] == [ee.LIDAR_WAIT_S] * 2
+
+
+# ---- placement on both sides, terrain hits --------------------------------------------------------------------------------
+def test_a_two_lane_road_gets_a_truck_each_side_and_a_service_road_one():
+    xy = np.array([[-40.0, 0.0], [40.0, 0.0]])
+    sides = ev.side_lines([(xy, []), (xy + (0, 50), [])], ["secondary", "service"])
+    assert len(sides) == 3
+    np.testing.assert_allclose(sides[0][0][:, 1], ev.SIDE_M["secondary"])
+    np.testing.assert_allclose(sides[1][0][:, 1], -ev.SIDE_M["secondary"])
+    np.testing.assert_allclose(sides[2][0][:, 1], 50.0)
+    g = flat_ground()[0]
+    surf = ev.Surfaces(g)
+    ground = lambda x, y: 0.0       # noqa: E731
+    got = ev.vehicles_on_lines(sides[:2], surf, ev.TRUCK_EVERY_M, ground=ground, box=(-40, -40, 40, 40))
+    ys = sorted({round(float(b[1]), 2) for b, _a in got})
+    assert ys == [-ev.SIDE_M["secondary"], ev.SIDE_M["secondary"]], "both sides kept, not merged as one road's copies"
+    twice = ev.vehicles_on_lines(sides[:1] * 2, surf, ev.TRUCK_EVERY_M, ground=ground, box=(-40, -40, 40, 40))
+    assert len(twice) == len([b for b, _a in got if b[1] > 0]), "(a copy of the same side: once)"
+
+
+def test_terrain_rising_into_a_body_is_a_hit_but_its_own_road_is_not():
+    road = flat_ground()
+    mound = ev.terrain_mesh(np.where(np.abs(np.arange(-40, 41))[None, :] < 100, 0.0, 0.0) +
+                            np.where((np.abs(np.arange(-40, 41)) <= 3)[:, None], 0.0, 2.0), -40, -40, (-40, -40, 40, 40))[0]
+    t = truck(0, 0, 0.0)
+    assert ck.vehicle_hits(t, road[0]).tolist() == [False]
+    assert ck.vehicle_hits(truck(0, 2.0, 0.0), mound).tolist() == [True], "the slope 1 m from its side reaches the body"
+    assert ev.GROUND in ev.HIT_BY and ev.MOVED in ev.HIT_BY
+
+
+def test_the_report_names_only_the_junctions_with_yellow_or_red_first():
+    import earth_eval as ee
+    res = [{"name": "clean", "checks": {"vehicles_hit": [0, 0], "crossings_cut": [0, 0]}},
+           {"name": "few", "checks": {"vehicles_hit": [3, 1]}},
+           {"name": "many", "checks": {"vehicles_hit": [9, 9], "crossings_cut": [0, 2]}},
+           {"name": "old", "checks": {"vehicles_hit": [4, None]}}]
+    assert ee.flagged_junctions(res) == [("many", [("yellow", 9), ("red", 2)]), ("few", [("yellow", 1)])]

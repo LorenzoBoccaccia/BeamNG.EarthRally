@@ -276,6 +276,19 @@ def run_junction(j, a, log):
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
 
+def flagged_junctions(results):
+    """[(name, [(what, count)])] of the junctions whose after side has a vehicle hitting (yellow) or meshes cutting (red), most
+    first: the pictures to look at; the others need no look unless they changed."""
+    out = []
+    for r in results:
+        what = [(name, (r.get("checks", {}).get(k) or [None, None])[1]) for k, name in
+                (("vehicles_hit", "yellow"), ("crossings_cut", "red"), ("overview_crossings_cut", "red in 1 km"))]
+        what = [(n, v) for n, v in what if v]
+        if what:
+            out.append((r["name"], what))
+    return sorted(out, key=lambda t: -sum(v for _n, v in t[1]))
+
+
 def write_report(results, a):
     rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max | vehicles hitting "
             "| crossings cutting | cutting in 1 km |", "|---|---|---|---|---|---|---|---|---|---|"]
@@ -294,8 +307,12 @@ def write_report(results, a):
         rows.append(f"| {r['name']} | {result} | {100 * r['kind_changed']:.2f} % | "
                     f"{g['max']:.2f} / {g['p99']:.2f} | " + " | ".join(
                         f"{r[k]['max']:.2f}" if r[k]["n"] else "-" for k in ("road", "deck", "rail")) + " | " + " | ".join(cells) + " |")
+    flagged = flagged_junctions(results)
+    look = (["## Look at these: yellow or red after the change", ""] +
+            [f"- **{n}** (`{n}.png`): " + ", ".join(f"{name} {v}" for name, v in what) for n, what in flagged] +
+            [""] if flagged else ["No junction has yellow or red after the change.", ""])
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
-          *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
+          *look, *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     with open(os.path.join(a.out, "report.json"), "w", encoding="utf-8") as f:

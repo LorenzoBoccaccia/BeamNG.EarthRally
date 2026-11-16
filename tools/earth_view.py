@@ -105,7 +105,10 @@ CLASS_RGB = np.array([
     (1.00, 0.00, 0.00),     # meshes cutting each other at a crossing of different levels: red
 ])
 CHECK_CLASSES = {"ground": (0, 1), "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
-HIT_BY = (2, 3, 4, 6)       # what a vehicle's body may not cut: ROAD, DECK, RAIL, TUNNEL
+# What a vehicle's body may not cut: every Earth mesh, the terrain too (a cut's slope or a mound beside a road or a track,
+# a ridge at a junction, the ground of a bridge Earth did not build): GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL. Its
+# own road or track under it never counts (earth_checks.BODY_BASE_M); kerbs, sidewalks and barriers along it do not either.
+HIT_BY = (0, 1, 2, 3, 4, 5, 6)
 KIND_CLASS = {"road": ROAD, "deck": DECK, "rail": RAIL, "bld": BUILDING, "b3dmr": BUILDING, "tunnel": TUNNEL, "walk": WALK,
               "barrier": BARRIER}
 DEFAULT_KINDS = ("road", "deck", "tunnel", "rail", "bld", "b3dmr", "walk", "barrier")
@@ -407,6 +410,11 @@ def surface_grid(tris, cls, box, step=SURFACE_STEP_M):
 TRUCK_LWH = (12.0, 2.55, 4.0)       # m long, wide, high: a full-height truck (the EU's 4 m)
 WAGON_LWH = (20.0, 3.0, 4.3)        # m: a full-height wagon (UIC's 4.32 m loading gauge over the rail)
 TRUCK_EVERY_M = 20.0                # m between the trucks' middles along a road
+# m from a road's line its trucks stand, one each side (both directions of a two-way road, both lanes of a dual
+# carriageway's): a slope, a mound or a wall along either edge reaches one. A narrow road's trucks stand on its line.
+SIDE_M = {"motorway": 1.75, "trunk": 1.75, "primary": 1.75, "secondary": 1.75, "tertiary": 1.75, "residential": 1.4,
+          "unclassified": 1.4}
+DUP_ACROSS_M = 1.0                  # m across its heading another vehicle stands from one already placed: the same one
 WAGON_EVERY_M = 21.0                # m between the wagons' middles (nose to tail, 1 m apart)
 NEIGH_M = 12.0                      # m round a truck: the surface whose triangles give its middle, heading and slope (a
                                     # 7 m road read 8 m round its end was near square: its heading turned 15 deg)
@@ -742,6 +750,7 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
     Its slope from the same surface LOOK_M ahead and behind. None within 0.75 * every of one placed on the same level (copies
     of one road, segments end to end). box (x0, y0, x1, y1): only points inside it (the view)."""
     placed = np.zeros((0, 3))
+    heads = np.zeros((0, 2))
     pb = {}
     out = []
     chosen = []                     # (probe?, base, axis) of every line, placed probes first
@@ -788,12 +797,47 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
             slope = (zs[0] - zs[1]) / (2 * LOOK_M) if None not in zs else 0.0
             chosen.append((probe, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
     for probe, base, axis in sorted(chosen, key=lambda c: not c[0]):        # (the probes first)
-        if len(placed) and len(_near(placed, pb, every, base, every * 0.75, level)):
-            continue
+        if len(placed):
+            near = _near(placed, pb, every, base, every * 0.75, level)
+            if len(near):           # (the same one: along its heading within 0.75 every, across within DUP_ACROSS_M)
+                d = base[:2] - placed[near, :2]
+                h = heads[near]
+                a_l = np.abs((d * h).sum(1))
+                across = np.abs(d[:, 0] * h[:, 1] - d[:, 1] * h[:, 0])
+                if ((a_l <= every * 0.75) & (across <= DUP_ACROSS_M)).any():
+                    continue
         out.append((base, axis))
         placed = np.vstack([placed, base])
+        a2 = np.asarray(axis[:2], np.float64)
+        heads = np.vstack([heads, a2 / max(float(np.hypot(*a2)), 1e-9)])
         pb = _buckets(placed, every)
     return out
+
+
+def side_lines(lines, classes):
+    """lines [(xy (k, 2), ranges)] each as its two sides (SIDE_M[class] from it, left and right), a narrow road's (no SIDE_M) as
+    it is; the ranges the same fractions."""
+    out = []
+    for (xy, ranges), c in zip(lines, classes):
+        off = SIDE_M.get(str(c), 0.0)
+        if off <= 0 or len(xy) < 2:
+            out.append((xy, ranges))
+            continue
+        out += [(offset_line(xy, off), ranges), (offset_line(xy, -off), ranges)]
+    return out
+
+
+def offset_line(xy, d):
+    """The polyline xy (k, 2) moved d m to its left (its vertices along the mean of their segments' normals)."""
+    xy = np.asarray(xy, np.float64)
+    seg = np.diff(xy, axis=0)
+    n = np.stack([-seg[:, 1], seg[:, 0]], 1)
+    n /= np.maximum(np.hypot(n[:, 0], n[:, 1]), 1e-9)[:, None]
+    vn = np.zeros_like(xy)
+    vn[:-1] += n
+    vn[1:] += n
+    vn /= np.maximum(np.hypot(vn[:, 0], vn[:, 1]), 1e-9)[:, None]
+    return xy + d * vn
 
 
 def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
@@ -822,8 +866,9 @@ def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
         rs, ts = Surfaces(tris[road]), Surfaces(tris[rail])
         roads_, rails_ = lines.get("road", []), lines.get("rail", [])
         others = [(xy, r, False) for xy, r in roads_] + [(xy, r, True) for xy, r in rails_]
-        probes = [crossings_under(xy, others) for xy, _r in roads_]
-        trucks = vehicles_on_lines(roads_, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes)
+        sides = side_lines(roads_, lines.get("road_cls", [None] * len(roads_)))
+        probes = [crossings_under(xy, others) for xy, _r in sides]
+        trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes)
         wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box)
         decks = Surfaces(tris[(cls == DECK) & up])      # (a bridge's: only a deck counts, not a road's edges painted under it)
         tracks = Surfaces(tris[rail | ((cls == DECK) & up)])    # (a railway's: its track, or a deck it runs on)
@@ -864,7 +909,7 @@ def map_lines(a, frame, box, log, margin=30.0):
         import roads
         xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
         la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
-        out, seen = {"road": [], "rail": []}, set()
+        out, seen = {"road": [], "rail": [], "road_cls": []}, set()
         for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
             feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
             if feats is None or not len(feats):
@@ -890,6 +935,8 @@ def map_lines(a, frame, box, log, margin=30.0):
                     ranges = []
                 for r in rings:
                     out[kind].append((np.asarray(r, np.float64), ranges if len(rings) == 1 else []))
+                    if kind == "road":
+                        out["road_cls"].append(str(cl[i]) if cl is not None else None)
         return out, height_limits(a, frame, box, log)
     except Exception as e:      # (the vehicles are then placed from the meshes alone)
         log(f"  map lines not read: {type(e).__name__}: {e}")
@@ -1465,7 +1512,7 @@ def main():
         vc = vc.copy()
         vc[:nv * 12][np.repeat(hits, 12)] = HIT
         checks.update(vehicles=nv, vehicles_hit=int(hits.sum()))
-        log(f"  reference vehicles: {nv} ({nv_t} trucks, {nv - nv_t} wagons), {int(hits.sum())} hitting a road or rail not "
+        log(f"  reference vehicles: {nv} ({nv_t} trucks, {nv - nv_t} wagons), {int(hits.sum())} hitting Earth's geometry not "
             f"their own (yellow)"
             + (f"; {int((vc == MISSING).sum()) // 12} points of the map's roads and railways with nothing drawn under them"
                if (vc == MISSING).any() else ""))
