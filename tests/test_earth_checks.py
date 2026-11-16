@@ -212,3 +212,24 @@ def test_the_report_names_only_the_junctions_with_yellow_or_red_first():
            {"name": "many", "checks": {"vehicles_hit": [9, 9], "crossings_cut": [0, 2]}},
            {"name": "old", "checks": {"vehicles_hit": [4, None]}}]
     assert ee.flagged_junctions(res) == [("many", [("yellow", 9), ("red", 2)]), ("few", [("yellow", 1)])]
+
+
+def test_a_rigid_truck_on_a_bend_keeps_to_the_line():
+    """Daikoku's service loop (radius 25-30 m, vertices 10 m apart): headed along its one segment, a truck's far end stood
+    1.3-1.5 m off the line; along the chord its ends stay within 0.6 m."""
+    ang = np.radians(np.arange(0, 181, 22.0))
+    line = 27.5 * np.stack([np.cos(ang), np.sin(ang)], 1)
+    for s in np.arange(6.0, ev._length(line) - 6, 1.7):          # (half a truck from the ends)
+        c, h = ev.chord_pose(line, s, 6.0)
+        for end in (c + 6.0 * h, c - 6.0 * h):
+            d = min(np.hypot(*(ev.point_at(line, q)[0] - end)) for q in np.linspace(0, ev._length(line), 2000))
+            assert d < 0.6, (s, d)      # (a 12 m chord of a 27.5 m bend: 0.65 m sagitta, about half each side)
+
+
+def test_japan_drives_on_the_left_in_the_views_build(monkeypatch):
+    import types
+    nav = types.SimpleNamespace(border_country=lambda la, lo: "JP", road_rules=lambda c: {"rightHandDrive": c == "JP"})
+    monkeypatch.setitem(sys.modules, "navgraph", nav)
+    assert ev.drives_left(35.46, 139.68, lambda m: None) is True
+    nav.border_country = lambda la, lo: None
+    assert ev.drives_left(48.8, 2.3, lambda m: None) is False

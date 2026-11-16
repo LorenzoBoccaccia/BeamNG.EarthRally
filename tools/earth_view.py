@@ -666,6 +666,22 @@ def _length(xy):
     return float(np.hypot(*np.diff(np.asarray(xy, np.float64), axis=0).T).sum()) if len(xy) >= 2 else 0.0
 
 
+def chord_pose(line, s, half):
+    """(centre (2,), unit heading (2,)) of a rigid vehicle 2 * half long at s metres along line (k, 2): heading along the chord
+    from s - half to s + half, centred between the line's point and the chord's middle. Headed along the one segment it stood
+    on, a 12 m truck 0.4-1.4 m before a vertex where a 25-30 m ramp turns 15 degrees stood 1.3-1.5 m off the line at its far end,
+    over its own deck's parapet (Daikoku's service loop)."""
+    L = _length(line)
+    p, t = point_at(line, s)
+    a, _ = point_at(line, max(0.0, s - half))
+    b, _ = point_at(line, min(L, s + half))
+    d = b - a
+    n = float(np.hypot(*d))
+    if n < 1e-6:
+        return p, t
+    return (p + (a + b) / 2.0) / 2.0, d / n
+
+
 def point_at(line, s):
     """(point, unit tangent) at s metres along line (k, 2)."""
     line = np.asarray(line, np.float64)
@@ -734,7 +750,8 @@ def missing_on_lines(lines, surf, box, ground=None, bridges_only=False, top=Fals
     return out
 
 
-def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M, painted=True, box=None, probes=None):
+def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M, painted=True, box=None, probes=None,
+                      half=None):
     """[(base (3,), axis (3,))]: a vehicle every metres along each line of Earth's map, heading along it. lines: [(xy (k, 2),
     ranges)], ranges [(start, end, "bridge" | "tunnel")] fractions of the line (Earth's roads.level_ranges). Where it stands:
     - a ground stretch of a road (painted True): on the terrain, ground(x, y): Earth paints its ground roads into the terrain
@@ -763,6 +780,8 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
         pts.sort(key=lambda q: q[2])
         if not pts:
             continue
+        if half:                    # (a rigid vehicle on a bend: along its chord, chord_pose)
+            pts = [(*chord_pose(xy, f * L, half), f, pr) for _p, _t, f, pr in pts]
         cands, prefs, kinds = [], [], []
         for p, _t, f, _pr in pts:
             kind = _kind(ranges, f, L)
@@ -868,8 +887,9 @@ def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
         others = [(xy, r, False) for xy, r in roads_] + [(xy, r, True) for xy, r in rails_]
         sides = side_lines(roads_, lines.get("road_cls", [None] * len(roads_)))
         probes = [crossings_under(xy, others) for xy, _r in sides]
-        trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes)
-        wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box)
+        trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes, half=TRUCK_LWH[0] / 2)
+        wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box,
+                                   half=WAGON_LWH[0] / 2)
         decks = Surfaces(tris[(cls == DECK) & up])      # (a bridge's: only a deck counts, not a road's edges painted under it)
         tracks = Surfaces(tris[rail | ((cls == DECK) & up)])    # (a railway's: its track, or a deck it runs on)
         missing = (missing_on_lines(lines.get("road", []), decks, box, ground, bridges_only=True)
@@ -1315,10 +1335,25 @@ def build_earth(a, frame, px, py, log, reach=None):
         blockworker = earth_state(a, log)
         log(f"building road tile ({tx}, {ty}) ...")
         blockworker.roads_tile(a.aid, a.anchor[0], a.anchor[1], HM_ZOOM, tx, ty, data_dir, "/vfs", True, 0.0,
-                               buildings=not a.no_buildings, left_hand=False, mph=False, q=a.q, gas_stations=True)
+                               buildings=not a.no_buildings, left_hand=drives_left(a.anchor[0], a.anchor[1], log), mph=False,
+                               q=a.q, gas_stations=True)
     z, holes, info = load_block_files(data_dir, a.aid, cx, cy)
     n = z.shape[0]
     return z, holes, info, cx - n / 2.0, cy - n / 2.0, (cx, cy), tiles, data_dir
+
+
+def drives_left(lat, lon, log):
+    """Whether traffic drives on the left at (lat, lon): its country's road rules (Earth's navgraph.border_country, road_rules),
+    as the server sets its tiles' left_hand. Built right-handed, Japan's link decks stood mirrored, 1.3-1.4 m to the right of
+    their map lines, at Daikoku. False when the country can't be told."""
+    try:
+        import navgraph
+        c = navgraph.border_country(float(lat), float(lon))
+        if c:
+            return bool(navgraph.road_rules(c)["rightHandDrive"])
+    except Exception as e:      # (no border data: right-handed, as before)
+        log(f"  driving side not known ({type(e).__name__}: {e}): right")
+    return False
 
 
 def read_tiles(data_dir, aid, tiles, kinds, log):
