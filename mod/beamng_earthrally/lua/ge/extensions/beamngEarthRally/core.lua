@@ -1556,6 +1556,10 @@ end
 -- Returns true when it holds the call.
 function M.interceptStart(mission, userSettings, startingOptions)
   if st.passThrough or type(mission) ~= 'table' then return false end
+  if mission.missionTypeData and mission.missionTypeData.earthRallyTour then      -- (the junction tour: ours whole)
+    tell('EarthRally: ' .. tostring(M.tour()))
+    return true
+  end
   local edition = mission.missionTypeData and mission.missionTypeData.earthRallyEdition
   if not edition then return false end
   ownLog('I', 'start requested for ' .. tostring(mission.id))
@@ -1603,10 +1607,13 @@ end
 -- there (M.start; the list's settings, nil from the menu: the mission's defaults). Returns true when it holds the call.
 function M.interceptLevelStart(mission, userSettings, level, startedFrom)
   if st.passThrough or type(mission) ~= 'table' then return false end
+  local tourStart = mission.missionTypeData and mission.missionTypeData.earthRallyTour
   local edition = mission.missionTypeData and mission.missionTypeData.earthRallyEdition
-  if not edition then return false end
-  local ok, err = ensureEdition(edition)
-  if not ok then ownLog('E', 'menu start of ' .. tostring(mission.id) .. ': ' .. tostring(err)); return false end
+  if not (edition or tourStart) then return false end
+  if not tourStart then
+    local ok, err = ensureEdition(edition)
+    if not ok then ownLog('E', 'menu start of ' .. tostring(mission.id) .. ': ' .. tostring(err)); return false end
+  end
   if st.menuStart then return true end                                  -- (one is being prepared already)
   local name = level or (mission.startTrigger and mission.startTrigger.level) or 'beamng_earth'
   local okL, current = pcall(function() return getCurrentLevelIdentifier and getCurrentLevelIdentifier() end)
@@ -1616,7 +1623,7 @@ function M.interceptLevelStart(mission, userSettings, level, startedFrom)
     return false
   end
   holdLoadingScreen()                         -- (first: the level's own loading screen ends inside ours)
-  st.menuStart = { mission = mission, userSettings = userSettings, edition = edition, since = st.clock,
+  st.menuStart = { mission = mission, userSettings = userSettings, edition = edition, since = st.clock, tour = tourStart,
     startingOptions = startedFrom and { startedFrom = startedFrom } or nil }
   ownLog('I', 'menu start of ' .. tostring(mission.id) .. ': loading ' .. name .. ' behind the loading screen, then the ' ..
     'service park')
@@ -1648,6 +1655,11 @@ local function menuStartTick()
   if es and es.inOurLevel and es.anchor and pl and pl.lat and not es.pending and not es.randomStart and st.phase == 'idle'
       and earthapi.ready() then
     st.menuStart = nil
+    if ms.tour then
+      releaseLoadingScreen('the junction tour takes over')
+      tell('EarthRally: ' .. tostring(M.tour()))
+      return
+    end
     st.pending = { mission = ms.mission, userSettings = ms.userSettings, startingOptions = ms.startingOptions }
     ownLog('I', 'the Earth level is in: teleporting to the service park and starting the loop there')
     M.start(ms.edition)
@@ -2297,27 +2309,22 @@ local function tourCtx()
       if not v then return end
       local rot = quatFromDir(vec3(dir.x, dir.y, 0):normalized(), vec3(0, 0, 1))
       if spawn and spawn.safeTeleport then
-        spawn.safeTeleport(v, vec3(pos.x, pos.y, pos.z), rot, nil, nil, nil, true)
+        spawn.safeTeleport(v, vec3(pos.x, pos.y, pos.z), rot, nil, nil, false, nil, true)     -- (as Earth's own)
       else
         v:setPositionRotation(pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w)
       end
       v:queueLuaCommand('recovery.clear()')
     end,
-    -- Earth's GPS to the drive's end and its autodrive on (its route on the map, the arrows, the car's AI in its lane at
-    -- the legal speed, unstuck when it stalls); without Earth's GPS module the AI drives the picked nodes itself
-    drive = function(names, dest, label)
+    -- Earth's GPS to the drive's end and Earth's autodrive on (its route on the map, the arrows, the car's AI in its lane
+    -- at the legal speed, unstuck when it stalls): no driving of ours
+    drive = function(_names, dest, label)
       local g = earthModule('gps')
-      if dest and g and g.setDestination and g.setAutodrive then
-        g.setDestination(dest.lat, dest.lon, label)
-        g.setAutodrive(true)
+      if not (dest and g and g.setDestination and g.setAutodrive) then
+        tell('EarthRally: Earth\'s GPS autodrive is not available: the junction tour cannot drive')
         return
       end
-      local v = veh()
-      if not v then return end
-      local q = {}
-      for i, n in ipairs(names) do q[i] = string.format('%q', tostring(n)) end
-      v:queueLuaCommand(string.format("ai.driveUsingPath({wpTargetList = {%s}, noOfLaps = 1, routeSpeedMode = 'legal', "
-        .. "driveInLane = 'on', avoidCars = 'on', aggression = 0.3})", table.concat(q, ', ')))
+      g.setDestination(dest.lat, dest.lon, label)
+      g.setAutodrive(true)
     end,
     arrived = function()
       local g = earthModule('gps')
@@ -2326,12 +2333,6 @@ local function tourCtx()
     stopAi = function()
       local g = earthModule('gps')
       if g and g.setAutodrive then pcall(g.setAutodrive, false) end
-      local v = veh()
-      if v then v:queueLuaCommand("ai.setMode('stop')") end
-    end,
-    releaseAi = function()
-      local v = veh()
-      if v then v:queueLuaCommand("ai.setMode('disabled')") end
     end,
     gpsClear = function() return earthapi.gpsClear() end,
     say = function(msg, seconds) earthapi.notify(msg, seconds) end,

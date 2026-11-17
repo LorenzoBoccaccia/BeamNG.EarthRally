@@ -185,12 +185,13 @@ beamngEarthRally_core.tour()                        the junction tour (below); t
 beamngEarthRally_core.tourStop()
 ```
 
-**Junction tour** (`tour.lua`; the window's "Junction tour" button, or `tour()` above): every junction of the eval set
+**Junction tour** (`tour.lua`; the mission **EarthRally: junction tour** in the mission list, in game or from the main
+menu, the window's "Junction tour" button, or `tour()` above): every junction of the eval set
 (`tools/junctions.json`, installed as `earthrally/junctions.json`) driven by the car's AI, one after the other, for one
 recording. For each: Earth's teleport there; once the roads round it are in, a drive through it on the navgraph (from about
 160 m before its nearest road node to about 160 m past it, the straightest way through, one-way roads their way); the car
 put on the drive's start facing along it, Earth's GPS set to its end and Earth's autodrive on (the route and the arrows on
-screen, the AI in its lane at the legal speed); when the GPS arrives (90 s at most) the next. A junction with a road over
+screen, its AI in its lane at the legal speed: no driving of our own); when the GPS arrives (90 s at most) the next. A junction with a road over
 another is driven once on each level. The window shows which junction it is on, and a button stops it (the car is the
 player's again).
 

@@ -125,7 +125,6 @@ def test_the_tour_drives_each_junction_and_ends(lua):
           car.pos = { x = e.x, y = e.y, z = e.z }         -- (it gets there)
         end,
         stopAi = function() calls[#calls + 1] = 'stop' end,
-        releaseAi = function() calls[#calls + 1] = 'release' end,
         gpsClear = function() calls[#calls + 1] = 'gps clear' end,
         say = function() end,
         log = function() end,
@@ -144,7 +143,7 @@ def test_the_tour_drives_each_junction_and_ends(lua):
     assert sum(c.startswith("drive") for c in calls) == 2
     first_drive = next(i for i, c in enumerate(calls) if c.startswith("drive"))
     assert calls.index("gps Junction: one") < first_drive, "the GPS set before the AI drives"
-    assert calls[-2:] == ["release", "gps clear"]
+    assert calls[-2:] == ["stop", "gps clear"]
 
 
 def test_the_junctions_file_reads_both_kinds_of_entry(lua):
