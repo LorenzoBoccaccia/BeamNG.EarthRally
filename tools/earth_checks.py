@@ -318,18 +318,19 @@ def _surface(side, tris, cls, C, near, classes):
     return g[_dist_xy(C[g, :2], xy) <= GROUND_CORRIDOR_M]
 
 
-def penetrations(tris, cls, lines, classes, near_m=CROSS_NEAR_M):
+def penetrations(tris, cls, lines, classes, near_m=CROSS_NEAR_M, xings=None):
     """(hit (len tris,) bool, crossings [(x, y, cut)]): at every crossing of the map's lines at different levels, the triangles
     of the upper line's surface and of the lower's cutting through each other (cutting). classes: {"ground": (ids,), "deck":
     id, "rail": id, "tunnel": id} (the viewer's classes). A line's surface: a road bridge its deck, a railway its track (and its
-    deck on a bridge), a long tunnel its tube, a ground road its ground GROUND_CORRIDOR_M round its line."""
+    deck on a bridge), a long tunnel its tube, a ground road its ground GROUND_CORRIDOR_M round its line. xings: those crossings
+    only (level_crossings' items), else all of lines'."""
     hit = np.zeros(len(tris), bool)
     out = []
     if not len(tris):
         return hit, out
     C = tris.mean(axis=1)
     lo, hi = tris[:, :, :2].min(axis=1), tris[:, :, :2].max(axis=1)
-    for x, y, up, low in level_crossings(lines):
+    for x, y, up, low in (level_crossings(lines) if xings is None else xings):
         near = np.nonzero((lo[:, 0] <= x + near_m) & (hi[:, 0] >= x - near_m) &
                           (lo[:, 1] <= y + near_m) & (hi[:, 1] >= y - near_m))[0]
         if not len(near):
