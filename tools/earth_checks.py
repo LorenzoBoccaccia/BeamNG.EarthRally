@@ -159,6 +159,54 @@ def vehicle_hits(vt, others, base=BODY_BASE_M):
     return out
 
 
+def _depth_in(O, c, n_long=9, n_wide=5):
+    """m the surfaces O (n, 3, 3) reach into the body c (8, 3 corners) at most: over a grid of its footprint, each surface's
+    height there inside the body's span, the lesser of its height over the body's base and under its top (the shorter move
+    that clears it: a deck 1 m too low, a slope 2 m into it). 0 when none is over the footprint inside the span."""
+    o, ax, ay = c[0], c[1] - c[0], c[3] - c[0]
+    u, v = np.meshgrid(np.linspace(0.02, 0.98, n_long), np.linspace(0.02, 0.98, n_wide))
+    S = o[:2] + u.ravel()[:, None] * ax[:2] + v.ravel()[:, None] * ay[:2]
+    base = o[2] + u.ravel() * ax[2] + v.ravel() * ay[2]
+    top = base + (c[4, 2] - c[0, 2])
+    a, b, d = O[:, 0], O[:, 1], O[:, 2]
+    e1, e2 = b[:, :2] - a[:, :2], d[:, :2] - a[:, :2]
+    den = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    ok = np.abs(den) > 1e-12
+    if not ok.any():
+        return 0.0
+    a, b, d, e1, e2, den = a[ok], b[ok], d[ok], e1[ok], e2[ok], den[ok]
+    w = S[:, None, :] - a[None, :, :2]
+    l1 = (w[..., 0] * e2[:, 1] - w[..., 1] * e2[:, 0]) / den
+    l2 = (e1[:, 0] * w[..., 1] - e1[:, 1] * w[..., 0]) / den
+    inside = (l1 >= 0) & (l2 >= 0) & (l1 + l2 <= 1)
+    z = a[:, 2] + l1 * (b[:, 2] - a[:, 2]) + l2 * (d[:, 2] - a[:, 2])
+    pen = np.minimum(z - base[:, None], top[:, None] - z)
+    pen = np.where(inside & (pen > 0), pen, 0.0)
+    return float(pen.max()) if pen.size else 0.0
+
+
+def hit_report(vt, kinds, tris, cls, hit, names, base=BODY_BASE_M):
+    """[{kind, x, y, z, heading, hits: {class name: how deep m}}] of the vehicles hit marks (vt: 12 triangles each, kinds: each
+    one's name, tris / cls: the scene and its classes, names: class -> name): what each one cuts, and how far into its body
+    the deepest corner of it reaches (0 for an edge crossing alone). The cases an analysis starts from."""
+    bodies = vehicle_bodies(vt, base)
+    out = []
+    for k in np.flatnonzero(hit):
+        c = bodies[k]
+        what = {}
+        for cl in sorted(set(int(v) for v in np.unique(cls))):
+            O = tris[cls == cl]
+            if not len(O) or not vehicle_hits(vt[12 * k:12 * (k + 1)], O, base)[0]:
+                continue
+            what[names.get(cl, str(cl))] = round(_depth_in(O, c), 2)
+        ax = c[1] - c[0]
+        mid = c.mean(axis=0)
+        out.append({"kind": kinds[k], "x": round(float(mid[0]), 1), "y": round(float(mid[1]), 1),
+                    "z": round(float(c[:4, 2].mean() - base), 2),
+                    "heading": round(float(np.degrees(np.arctan2(ax[0], ax[1])) % 360), 0), "hits": what})
+    return out
+
+
 # ---- crossings at different levels ------------------------------------------------------------------------------------------
 def _level(ranges, f):
     for a, b, k in ranges:

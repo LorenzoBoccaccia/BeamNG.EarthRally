@@ -233,3 +233,24 @@ def test_japan_drives_on_the_left_in_the_views_build(monkeypatch):
     assert ev.drives_left(35.46, 139.68, lambda m: None) is True
     nav.border_country = lambda la, lo: None
     assert ev.drives_left(48.8, 2.3, lambda m: None) is False
+
+
+def test_the_hit_report_says_where_and_how_deep():
+    low = slab(0, 0, 3.0, 4.5, Y, 30, 10)
+    vt = np.concatenate([truck(0, 0, 0.0), truck(0, 30, 0.0)])
+    cls = np.full(len(low), ev.DECK, np.int8)
+    hit = ck.vehicle_hits(vt, low)
+    rep = ck.hit_report(vt, ["truck", "truck"], low, cls, hit, {ev.DECK: "bridge deck"})
+    assert len(rep) == 1 and rep[0]["kind"] == "truck" and abs(rep[0]["x"]) < 0.1 and abs(rep[0]["y"]) < 0.1
+    assert rep[0]["hits"] == {"bridge deck": 1.0}         # (its underside 3 m up, the 4 m truck's roof: 1 m too low)
+
+
+def test_the_hits_table_lists_the_worst_first_and_every_hit():
+    import earth_hits as eh
+    rs = [{"name": "a", "error": None, "vehicles": 10, "vehicles_hit": 0, "crossings": 2, "crossings_cut": 0,
+           "overview_crossings_cut": 0, "hits": []},
+          {"name": "b", "error": None, "vehicles": 20, "vehicles_hit": 2, "crossings": 3, "crossings_cut": 1,
+           "overview_crossings_cut": 2, "hits": [{"kind": "truck", "x": 1.0, "y": 2.0, "z": 3.0, "heading": 90,
+                                                  "hits": {"ground": 1.2}}]}]
+    t = eh.table(rs)
+    assert t.index("| b |") < t.index("| a |") and "truck at x 1.0 y 2.0 z 3.0 heading 90: hits ground by 1.2 m" in t
