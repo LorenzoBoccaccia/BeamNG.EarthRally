@@ -254,3 +254,28 @@ def test_the_hits_table_lists_the_worst_first_and_every_hit():
                                                   "hits": {"ground": 1.2}}]}]
     t = eh.table(rs)
     assert t.index("| b |") < t.index("| a |") and "truck at x 1.0 y 2.0 z 3.0 heading 90: hits ground by 1.2 m" in t
+
+
+def test_struck_names_the_triangles_a_body_cuts_not_the_ones_beside_it():
+    base = np.array([0.0, 0.0, 0.0])
+    vt = ev.box_triangles(base, np.array([1.0, 0.0, 0.0]), 12.0, 2.55, 4.0)
+    inside = np.array([[[-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0]]])        # (a slab through the body)
+    beside = inside + np.array([0.0, 10.0, 0.0])                                       # (10 m to its side)
+    got = ck.struck(vt, np.concatenate([inside, beside]))
+    assert got.tolist() == [True, False]
+
+
+def test_a_hit_is_named_by_where_it_is_what_it_stands_on_and_what_it_strikes():
+    class Frame:
+        def enu_to_geodetic(self, x, y, z):
+            return 45.0 + np.asarray(y) / 111000.0, 7.0 + np.asarray(x) / 78000.0, z
+    map_l = {"road": [(np.array([[-50.0, 0.0], [50.0, 0.0]]), []), (np.array([[-50.0, 6.0], [50.0, 6.0]]), [(0.0, 1.0, "bridge")])],
+             "road_id": ["own-id", "deck-id"], "road_cls": ["primary", "motorway"], "rail": [], "rail_id": [], "rail_cls": []}
+    hits = [{"kind": "truck", "x": 0.0, "y": 1.5, "z": 0.0, "body_base": 0.5, "body_top": 4.5, "heading": 90.0,
+             "hits": {"bridge deck": 0.3, "ground": 0.2},
+             "struck": {"bridge deck": {"n": 2, "x": 0.0, "y": 5.0, "z_lo": 0.6, "z_hi": 1.0},
+                        "ground": {"n": 1, "x": 1.0, "y": 0.5, "z_lo": 0.4, "z_hi": 0.7}}}]
+    line, = ev.named_hits(hits, map_l, Frame())
+    assert "truck at 45.0000" in line and "on road own-id (primary, ground)" in line
+    assert "bridge deck at x 0.0 y 5.0 z 0.6..1.0" in line and "of road deck-id (motorway, bridge)" in line
+    assert "ground at x 1.0 y 0.5" in line and "graded by nearest road own-id" in line
