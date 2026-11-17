@@ -181,7 +181,18 @@ game's GE Lua console:
 beamngEarthRally_core.start('testbed-algarve')      teleports to the service park, builds the loop for that anchor, starts it
 beamngEarthRally_core.start('testbed-algarve', true) only teleports to the service park
 beamngEarthRally_core.setAdapt(true)                at a rebase, move the race path with Earth's transform (experiment)
+beamngEarthRally_core.tour()                        the junction tour (below); tour('popoli_a25_ss17') from that one on
+beamngEarthRally_core.tourStop()
 ```
+
+**Junction tour** (`tour.lua`; the window's "Junction tour" button, or `tour()` above): every junction of the eval set
+(`tools/junctions.json`, installed as `earthrally/junctions.json`) driven by the car's AI, one after the other, for one
+recording. For each: Earth's teleport there; once the roads round it are in, a drive through it on the navgraph (from about
+160 m before its nearest road node to about 160 m past it, the straightest way through, one-way roads their way); the car
+put on the drive's start facing along it, Earth's GPS set to its end and Earth's autodrive on (the route and the arrows on
+screen, the AI in its lane at the legal speed); when the GPS arrives (90 s at most) the next. A junction with a road over
+another is driven once on each level. The window shows which junction it is on, and a button stops it (the car is the
+player's again).
 
 The ground arrows of a liaison and the distance the time-control panel shows (`guide.lua`, `core.lua`): the game plans them
 from the car to the next time control over the navgraph, which BeamNG.Earth only builds for about a kilometre round the player.
