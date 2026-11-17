@@ -99,7 +99,7 @@ def build_side(j, side, tree, a, log):
         return None if ok else f"no before side in {out} (capture it: earth_eval.py --out {a.before_from} ...)"
     os.makedirs(out, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "earth_view.py"), "--earth", tree, "--out", out, "--name", "view", "--dump",
-           "--label-prefix", f"{a.labels[SIDES.index(side)]}: ", "--image", a.image, "--views", a.views] + junction_args(j)
+           "--label-prefix", f"{getattr(a, 'labels', SIDES)[SIDES.index(side)]}: ", "--image", a.image, "--views", a.views] + junction_args(j)
     if side == "after":         # (the overview marks the ground that moved since before)
         cmd += ["--compare-data", os.path.join(side_dir(a, j["name"], "before"), "data")]
     for flag in ("reuse", "online", "no_buildings"):
