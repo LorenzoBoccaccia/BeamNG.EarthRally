@@ -159,3 +159,25 @@ def test_a_before_only_capture_builds_no_after_side(tmp_path, monkeypatch):
     a = types.SimpleNamespace(out=str(tmp_path), before="b", after="a", sides=["before"])
     res = ee.run_junction({"name": "x"}, a, lambda m: None)
     assert built == ["before"] and "error" not in res
+
+
+def test_a_sides_timing_is_its_build_and_the_solver_passes_it_logged(tmp_path):
+    side = tmp_path / "after"
+    (side / "data").mkdir(parents=True)
+    (side / "data" / "timing.json").write_text(json.dumps({"block_s": 100.0, "tiles_s": 50.0, "tiles": 3}))
+    (side / "view.log").write_text(
+        "WARNING earthd.grading: grading: road laws 14/1/2: 3 of 9 plans changed, 4 chains, 2 couplings, 99 samples, "
+        "1 networks (0 infeasible, left as they are), 1.50 s\n"
+        "WARNING earthd.grading: grading: SHAPES pid 7 region 14/1/2: 9 cells, 5 members, 1 systems (0 infeasible, left "
+        "as they are), 1 roads graded, find 0.25 s, solve 2.25 s\n")
+    t = ee.load_timing(str(side))
+    assert t["build_s"] == 150.0 and t["laws_s"] == 1.5 and t["shapes_s"] == 2.5 and t["solver_s"] == 4.0
+    assert ee.load_timing(str(tmp_path / "none")) == {}
+
+
+def test_the_build_time_table_has_the_change_and_the_total():
+    rows = ee.timing_rows([{"name": "j", "timing": {"before": {"build_s": 100.0}, "after": {"build_s": 130.0, "solver_s": 20.0}}},
+                           {"name": "k", "timing": {"before": {}, "after": {"build_s": 50.0}}}])
+    assert "| j | 100.0 | 130.0 | +30 % | 20.0 |" in rows
+    assert "| k | - | 50.0 | - | - |" in rows
+    assert "| **total** | 100 | 130 | +30 % | 20 |" in rows

@@ -1,5 +1,6 @@
 """One page of an Earth eval run (tools/earth_eval.py): every junction's upstream views next to the latest ones, the vehicle
-hits and mesh cuts of each side, the junctions with something still hitting first. Only that run: no history.
+hits and mesh cuts of each side, the junctions with something still hitting first; first of all Earth's build time
+upstream against latest (what the new passes cost). Only that run: no history.
 
     python tools/eval_page.py --run <earth_eval out> --out <page dir>
 
@@ -94,6 +95,29 @@ def build(run, out):
         verdict = ("worse, " if r.get("worse") else "") + ("changed" if r.get("changed") else r.get("verdict", ""))
         rows.append(f'<tr><td><a href="#{e(n)}">{e(n)}</a></td>' + "".join(cell(*c[k]) for k, _n in CHECK_NAMES)
                     + f"<td>{e(verdict)}</td></tr>")
+    trows, tb, ta, ts = [], 0.0, 0.0, 0.0
+    for r in sorted(results, key=lambda r: r["name"]):
+        t = r.get("timing") or {}
+        b, a_ = (t.get("before") or {}).get("build_s"), (t.get("after") or {}).get("build_s")
+        s = (t.get("after") or {}).get("solver_s")
+        if not (b and a_):
+            continue
+        tb, ta, ts = tb + b, ta + a_, ts + (s or 0.0)
+        ch = 100.0 * (a_ - b) / b
+        trows.append(f'<tr><td>{e(r["name"])}</td><td>{b:.0f} s</td><td><b>{a_:.0f} s</b></td>'
+                     f'<td class="{"bad" if ch > 10 else "good" if ch < -10 else ""}"><b>{ch:+.0f} %</b></td>'
+                     f'<td>{(s or 0.0):.0f} s ({100.0 * (s or 0.0) / a_:.0f} %)</td></tr>')
+    if trows:
+        ch = 100.0 * (ta - tb) / tb
+        timing = (f'<h2>Build time: upstream &rarr; latest</h2><p><b>{tb:.0f} s &rarr; {ta:.0f} s ({ch:+.0f} %)</b> over '
+                  f'{len(trows)} junctions; the new solver passes (interchange shapes, road laws) {ts:.0f} s of it '
+                  f'({100.0 * ts / ta:.0f} %).</p><div class="wrap"><table><thead><tr><th>junction</th><th>upstream</th>'
+                  f'<th>latest</th><th>change</th><th>solver passes (share of latest)</th></tr></thead><tbody>'
+                  f'{"".join(trows)}</tbody></table></div><p class="mute">Earth\'s own build of each place (its terrain '
+                  f'block and road tiles), both sides built in the same run on the same machine; the solver time is '
+                  f'what those passes logged, summed over their cells.</p>')
+    else:
+        timing = '<p class="mute">No build times in this run (a side reused from an earlier run has none).</p>'
     secs = []
     for r in results:
         n = r["name"]
@@ -116,6 +140,7 @@ south-west. Cyan boxes are 4 m trucks on the roads, violet ones 4.3 m wagons on 
 it hits Earth's geometry (terrain included).</p>
 <p>upstream: <code>{e(up[0])}</code> {e(up[1])} <span class="mute">{e(up[2])}</span><br>
 latest: <code>{e(la[0])}</code> {e(la[1])} <span class="mute">{e(la[2])}</span></p>
+{timing}
 <div class="wrap"><table><thead><tr><th>junction ({len(results)})</th>""" + "".join(
         f"<th>{name}<br><span class=mute>{tot[k][0]} &rarr; {tot[k][1]}</span></th>" for k, name in CHECK_NAMES) + \
         f"""<th>result</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
