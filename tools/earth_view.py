@@ -598,7 +598,7 @@ def named_hits(hits, map_l, frame):
     return out
 
 
-def named_cuts(xings, map_l, frame, box):
+def named_cuts(xings, map_l, frame, box, label="cut"):
     """The log lines of the crossings whose meshes cut each other (earth_checks.penetrations' (x, y, cut)) in box: where
     (lat, lon) and the map's lines crossing there."""
     out = []
@@ -607,7 +607,7 @@ def named_cuts(xings, map_l, frame, box):
             continue
         la, lo, _ = frame.enu_to_geodetic(np.array([c[0]]), np.array([c[1]]), 0.0)
         near = lines_near(map_l, (c[0], c[1]), 3.0, n=4)
-        out.append(f"    cut at {float(np.ravel(la)[0]):.6f},{float(np.ravel(lo)[0]):.6f} (x {c[0]:.1f} y {c[1]:.1f}): "
+        out.append(f"    {label} at {float(np.ravel(la)[0]):.6f},{float(np.ravel(lo)[0]):.6f} (x {c[0]:.1f} y {c[1]:.1f}): "
                    + ("; ".join(line_name(r) for r in near) or "no map line within 3 m"))
     return out
 
@@ -1725,6 +1725,8 @@ def main():
                 oc = np.where(ocut, CUT, oc).astype(np.int8)
                 checks.update(overview_crossings=len(oxings), overview_crossings_cut=earth_checks.count_cut(oxings))
                 log(f"  overview: {len(oxings)} crossings at different levels, {checks['overview_crossings_cut']} cutting (red)")
+                for line in named_cuts(oxings, ov_map, frame, ov_box, "overview cut"):
+                    log(line)
             log(f"  overview: {len(ot)} triangles" + (f", {int((oc == ROSE).sum())} of rising ground and {int((oc == FELL).sum())}"
                                                      f" of falling ground since --compare-data" if dz is not None else ""))
             cam = overview_camera(ot, target, W, H)
