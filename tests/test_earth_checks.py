@@ -195,6 +195,18 @@ def test_a_two_lane_road_gets_a_truck_each_side_and_a_service_road_one():
     assert len(twice) == len([b for b, _a in got if b[1] > 0]), "(a copy of the same side: once)"
 
 
+def test_a_truck_keeps_within_earths_carriageway():
+    # (Compiegne: a 5.5 m secondary; its side 1.75 m out put a 2.55 m truck 0.28 m past the edge, into a track's fill
+    # standing beside the road under the bridge's end)
+    xy = np.array([[-40.0, 0.0], [40.0, 0.0]])
+    sides = ev.side_lines([(xy, []), (xy + (0, 50), []), (xy + (0, 100), [])], ["secondary"] * 3, [2.75, 4.0, None])
+    assert len(sides) == 6
+    np.testing.assert_allclose(sides[0][0][:, 1], 2.75 - ev.TRUCK_LWH[1] / 2)
+    np.testing.assert_allclose(sides[1][0][:, 1], -(2.75 - ev.TRUCK_LWH[1] / 2))
+    np.testing.assert_allclose(sides[2][0][:, 1], 50.0 + ev.SIDE_M["secondary"])     # (wide enough: as before)
+    np.testing.assert_allclose(sides[4][0][:, 1], 100.0 + ev.SIDE_M["secondary"])    # (not known: as before)
+
+
 def test_terrain_rising_into_a_body_is_a_hit_but_its_own_road_is_not():
     road = flat_ground()
     mound = ev.terrain_mesh(np.where(np.abs(np.arange(-40, 41))[None, :] < 100, 0.0, 0.0) +

@@ -951,12 +951,17 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
     return out
 
 
-def side_lines(lines, classes):
+def side_lines(lines, classes, halves=None):
     """lines [(xy (k, 2), ranges)] each as its two sides (SIDE_M[class] from it, left and right), a narrow road's (no SIDE_M) as
-    it is; the ranges the same fractions."""
+    it is; the ranges the same fractions. halves: per line Earth's carriageway half width (m, None: not known): a side no
+    farther out than a truck keeps within it (Compiegne's 5.5 m secondary: a truck 1.75 m out stood 0.28 m past its edge,
+    against the fill of a track's end beside it)."""
     out = []
-    for (xy, ranges), c in zip(lines, classes):
+    for k, ((xy, ranges), c) in enumerate(zip(lines, classes)):
         off = SIDE_M.get(str(c), 0.0)
+        half = halves[k] if halves is not None and k < len(halves) else None
+        if half is not None:
+            off = min(off, float(half) - TRUCK_LWH[1] / 2)
         if off <= 0 or len(xy) < 2:
             out.append((xy, ranges))
             continue
@@ -1003,7 +1008,7 @@ def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
         rs, ts = Surfaces(tris[road]), Surfaces(tris[rail])
         roads_, rails_ = lines.get("road", []), lines.get("rail", [])
         others = [(xy, r, False) for xy, r in roads_] + [(xy, r, True) for xy, r in rails_]
-        sides = side_lines(roads_, lines.get("road_cls", [None] * len(roads_)))
+        sides = side_lines(roads_, lines.get("road_cls", [None] * len(roads_)), lines.get("road_half"))
         probes = [crossings_under(xy, others) for xy, _r in sides]
         trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes, half=TRUCK_LWH[0] / 2)
         wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box,
@@ -1047,13 +1052,14 @@ def map_lines(a, frame, box, log, margin=30.0):
         import roads
         xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
         la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
-        out, seen = {"road": [], "rail": [], "road_cls": [], "road_id": [], "rail_id": [], "rail_cls": []}, set()
+        out, seen = {"road": [], "rail": [], "road_cls": [], "road_id": [], "rail_id": [], "rail_cls": [], "road_half": []}, set()
         for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
             feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
             if feats is None or not len(feats):
                 continue
             xy = feats.xy_in(frame)
             sub, cl = feats.attrs.get("subtype"), feats.attrs.get("class")
+            specs = roads.road_specs(feats)     # (Earth's carriageway widths)
             for i in range(len(feats)):
                 fid = str(feats.ids[i])          # (an Overture GERS id)
                 if fid in seen:
@@ -1075,6 +1081,8 @@ def map_lines(a, frame, box, log, margin=30.0):
                     out[kind].append((np.asarray(r, np.float64), ranges if len(rings) == 1 else []))
                     out[kind + "_cls"].append(str(cl[i]) if cl is not None else None)
                     out[kind + "_id"].append(fid)
+                    if kind == "road":
+                        out["road_half"].append(specs[i].width / 2 if specs[i] is not None else None)
         return out, height_limits(a, frame, box, log)
     except Exception as e:      # (the vehicles are then placed from the meshes alone)
         log(f"  map lines not read: {type(e).__name__}: {e}")
@@ -1311,6 +1319,39 @@ def overview_scene(z, x0, y0, box, holes, meshes, dz=None):
         T.append(m)
         C.append(np.full(len(m), KIND_CLASS.get(kind, OTHER), np.int8))
     return np.concatenate(T), np.concatenate(C)
+
+
+def overview_cuts(z, x0, y0, holes, tris, cls, lines):
+    """(cut (len tris,) bool, crossings [(x, y, cut)]) of the overview's scene (tris, cls: its ground GROUND or MOVED): each
+    crossing of the map's lines at different levels checked as the close-up checks it, on the lattice's own ground round
+    it (terrain_mesh, 1 m) with the overview's meshes there. The overview's ground is every OVERVIEW_STEP-th sample: one of
+    its triangles spans a fill's edge, and its middle falls in the road's corridor (earth_checks.GROUND_CORRIDOR_M) where
+    the lattice's own do not (Compiegne: a track bed's end 5 m off the road under its deck's last metre, a cut in the
+    overview only). The overview's ground triangles over a cutting one of the lattice's are marked cut."""
+    cut = np.zeros(len(tris), bool)
+    out = []
+    if not len(tris):
+        return cut, out
+    ground = cls <= MOVED
+    M = np.flatnonzero(~ground)
+    lo, hi = tris[M][:, :, :2].min(axis=1), tris[M][:, :, :2].max(axis=1)
+    G = np.flatnonzero(ground)
+    gc = tris[G].mean(axis=1)[:, :2]
+    r = earth_checks.CROSS_NEAR_M + 2.0
+    for xing in earth_checks.level_crossings(lines):
+        x, y = xing[0], xing[1]
+        b = (x - r, y - r, x + r, y + r)
+        g, gcl = terrain_mesh(z, x0, y0, b, holes)
+        m = M[(hi[:, 0] >= b[0]) & (lo[:, 0] <= b[2]) & (hi[:, 1] >= b[1]) & (lo[:, 1] <= b[3])]
+        hit, got = earth_checks.penetrations(np.concatenate([g, tris[m]]), np.concatenate([gcl, cls[m]]), lines,
+                                             CHECK_CLASSES, xings=[xing])
+        out += got
+        cut[m[hit[len(g):]]] = True
+        if hit[:len(g)].any():
+            c = g[hit[:len(g)]].mean(axis=1)[:, :2]
+            near = (np.abs(gc[:, None, :] - c[None]) <= OVERVIEW_STEP).all(axis=2).any(axis=1)
+            cut[G[near]] = True
+    return cut, out
 
 
 def inside_triangles(tris, box, margin=5.0):
@@ -1721,7 +1762,7 @@ def main():
             ov_map, _ = map_lines(a, frame, ov_box, log, margin=0.0)
             if ov_map is not None:
                 base_cls = np.where(np.isin(oc, (ROSE, FELL)), GROUND, oc)
-                ocut, oxings = earth_checks.penetrations(ot, base_cls, ov_map, CHECK_CLASSES)
+                ocut, oxings = overview_cuts(z, x0, y0, None if a.no_holes else holes, ot, base_cls, ov_map)
                 oc = np.where(ocut, CUT, oc).astype(np.int8)
                 checks.update(overview_crossings=len(oxings), overview_crossings_cut=earth_checks.count_cut(oxings))
                 log(f"  overview: {len(oxings)} crossings at different levels, {checks['overview_crossings_cut']} cutting (red)")

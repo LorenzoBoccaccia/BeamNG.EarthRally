@@ -8,6 +8,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import earth_checks as ck  # noqa: E402
 import earth_eval as ee  # noqa: E402
 import earth_view as ev  # noqa: E402
 
@@ -113,3 +114,36 @@ def grids(deck_z=4.0):
 def quad(x0, y0, x1, y1, z):
     a, b, c, d = (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)
     return np.array([[a, b, c], [a, c, d]], np.float64)
+
+
+def bed_and_deck(sunk=0.0):
+    """(z, x0, y0, tris, cls, lines): a road along x = 0 on the ground (0 m) under a rail bridge along y = 0 over |x| <= 6
+    (its deck 6..7.5 m), the track's bed at 7.2 m from |x| = 4.5 on (its end under the deck's last metre and a half, as
+    Earth's bed plan's round end); sunk: the deck that far into the road instead. The lattice from x0 = -41: the overview's
+    2 m samples at odd x."""
+    n = 83
+    xs = -41.0 + np.arange(n)
+    z = np.tile(np.where(np.abs(xs) >= 4.5, 7.2, 0.0), (n, 1))
+    x0 = y0 = -41.0
+    lo = 6.0 - sunk
+    deck = ev.box_triangles((0.0, 0.0, lo), (1.0, 0.0, 0.0), 12.0, 5.0, 1.5)
+    lines = {"road": [(np.array([[0.0, -40.0], [0.0, 40.0]]), [])],
+             "rail": [(np.array([[-40.0, 0.0], [40.0, 0.0]]), [(34.0 / 80.0, 46.0 / 80.0, "bridge")])]}
+    box = (-30.0, -30.0, 30.0, 30.0)
+    g, gc = ev.overview_ground(z, x0, y0, box, step=2)
+    return z, x0, y0, np.concatenate([g, deck]), np.concatenate([gc, np.full(len(deck), ev.RAIL, np.int8)]), lines
+
+
+def test_the_overview_checks_its_crossings_on_the_lattices_own_ground():
+    z, x0, y0, tris, cls, lines = bed_and_deck()
+    _cut, coarse = ck.penetrations(tris, cls, lines, ev.CHECK_CLASSES)
+    assert [c[2] for c in coarse] == [True], "(the case: a 2 m triangle over the bed's edge reaches the road's corridor)"
+    cut, got = ev.overview_cuts(z, x0, y0, None, tris, cls, lines)
+    assert [c[2] for c in got] == [False] and not cut.any()
+
+
+def test_the_overview_still_finds_a_deck_sunk_into_the_road():
+    z, x0, y0, tris, cls, lines = bed_and_deck(sunk=6.5)
+    cut, got = ev.overview_cuts(z, x0, y0, None, tris, cls, lines)
+    assert [c[2] for c in got] == [True]
+    assert cut[cls == ev.RAIL].any() and cut[cls == ev.GROUND].any()
