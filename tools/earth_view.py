@@ -1547,6 +1547,14 @@ def main():
         vc = vc.copy()
         vc[:nv * 12][np.repeat(hits, 12)] = HIT
         checks.update(vehicles=nv, vehicles_hit=int(hits.sum()))
+        if hits.any():                  # (each one: where, what it cuts, how deep: the cases to analyse)
+            hb = np.isin(surface[1], HIT_BY)
+            kinds = ["truck" if vc[12 * k] == TRUCK else "wagon" for k in range(nv)]
+            checks["hits"] = earth_checks.hit_report(vt[:nv * 12], kinds, tris[hb], surface[1][hb], hits,
+                                                     {k: CLASS_NAME[k].split(" (")[0].split(",")[0] for k in HIT_BY})
+            for h in checks["hits"]:
+                log(f"    {h['kind']} at x {h['x']} y {h['y']} z {h['z']} heading {h['heading']:g}: hits "
+                    + ", ".join(f"{n} by {d} m" for n, d in h["hits"].items()))
         log(f"  reference vehicles: {nv} ({nv_t} trucks, {nv - nv_t} wagons), {int(hits.sum())} hitting Earth's geometry not "
             f"their own (yellow)"
             + (f"; {int((vc == MISSING).sum()) // 12} points of the map's roads and railways with nothing drawn under them"
