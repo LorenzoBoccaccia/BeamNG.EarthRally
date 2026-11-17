@@ -159,6 +159,26 @@ def vehicle_hits(vt, others, base=BODY_BASE_M):
     return out
 
 
+def struck(vt1, others, base=BODY_BASE_M):
+    """Bool (len others,): which of others (n, 3, 3) one vehicle's body (vt1: its 12 triangles) cuts or holds a corner of."""
+    out = np.zeros(len(others), bool)
+    if not len(others):
+        return out
+    c = vehicle_bodies(vt1, base)[0]
+    olo, ohi = _aabb(others)
+    lo, hi = c.min(0), c.max(0)
+    near = np.nonzero(((olo <= hi) & (ohi >= lo)).all(axis=1))[0]
+    if not len(near):
+        return out
+    O = others[near]
+    hit = _inside_body(O.reshape(-1, 3), c).reshape(-1, 3).any(axis=1)
+    bt = _body_triangles(c)
+    i, j = np.meshgrid(np.arange(len(bt)), np.arange(len(O)), indexing="ij")
+    x = tri_tri_cross(bt[i.ravel()], O[j.ravel()]).reshape(len(bt), len(O)).any(axis=0)
+    out[near] = hit | x
+    return out
+
+
 def _depth_in(O, c, n_long=9, n_wide=5):
     """m the surfaces O (n, 3, 3) reach into the body c (8, 3 corners) at most: over a grid of its footprint, each surface's
     height there inside the body's span, the lesser of its height over the body's base and under its top (the shorter move
@@ -193,17 +213,25 @@ def hit_report(vt, kinds, tris, cls, hit, names, base=BODY_BASE_M):
     out = []
     for k in np.flatnonzero(hit):
         c = bodies[k]
-        what = {}
+        what, parts = {}, {}
         for cl in sorted(set(int(v) for v in np.unique(cls))):
             O = tris[cls == cl]
-            if not len(O) or not vehicle_hits(vt[12 * k:12 * (k + 1)], O, base)[0]:
+            if not len(O):
                 continue
-            what[names.get(cl, str(cl))] = round(_depth_in(O, c), 2)
+            s = struck(vt[12 * k:12 * (k + 1)], O, base)
+            if not s.any():
+                continue
+            name = names.get(cl, str(cl))
+            what[name] = round(_depth_in(O, c), 2)
+            P = O[s]
+            parts[name] = {"n": int(s.sum()), "x": round(float(P[:, :, 0].mean()), 1), "y": round(float(P[:, :, 1].mean()), 1),
+                           "z_lo": round(float(P[:, :, 2].min()), 2), "z_hi": round(float(P[:, :, 2].max()), 2)}
         ax = c[1] - c[0]
         mid = c.mean(axis=0)
         out.append({"kind": kinds[k], "x": round(float(mid[0]), 1), "y": round(float(mid[1]), 1),
-                    "z": round(float(c[:4, 2].mean() - base), 2),
-                    "heading": round(float(np.degrees(np.arctan2(ax[0], ax[1])) % 360), 0), "hits": what})
+                    "z": round(float(c[:4, 2].mean() - base), 2), "body_base": round(float(c[:4, 2].min()), 2),
+                    "body_top": round(float(c[4:, 2].max()), 2),
+                    "heading": round(float(np.degrees(np.arctan2(ax[0], ax[1])) % 360), 0), "hits": what, "struck": parts})
     return out
 
 

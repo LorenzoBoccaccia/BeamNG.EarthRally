@@ -526,6 +526,92 @@ def _dist_to_line(p, line):
     return float(np.hypot(*(a + ab * t[:, None] - p).T).min()) if len(a) else math.inf
 
 
+NAME_REACH_M = 12.0                 # m round a point the map's lines are named from (a hit's, a cut crossing's)
+OWN_REACH_M = 8.0                   # m from a vehicle its own line is looked for (a truck drives in its lane, off the line)
+
+
+def lines_near(map_l, p, reach=NAME_REACH_M, kinds=("road", "rail"), n=3):
+    """[{kind, id, cls, level, d}] of the map's lines within reach of p (x, y), nearest first, n at most: each line's
+    feature id, class and its level there ("bridge", "tunnel" or "ground")."""
+    out = []
+    if not map_l:
+        return out
+    p = np.asarray(p, np.float64)[:2]
+    for kind in kinds:
+        ids, cls_ = map_l.get(kind + "_id") or [], map_l.get(kind + "_cls") or []
+        for n_, (xy, ranges) in enumerate(map_l.get(kind, [])):
+            xy = np.asarray(xy, np.float64)
+            if len(xy) < 2 or (p < xy.min(axis=0) - reach).any() or (p > xy.max(axis=0) + reach).any():
+                continue            # (outside its box grown by reach: a long segment's vertices are far from a point by it)
+            a, b = xy[:-1], xy[1:]
+            ab = b - a
+            t = np.clip(((p - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+            d = np.hypot(*(a + ab * t[:, None] - p).T)
+            k = int(np.argmin(d))
+            if d[k] > reach:
+                continue
+            seg = np.hypot(*ab.T)
+            L = float(seg.sum())
+            f = (float(seg[:k].sum()) + float(t[k]) * float(seg[k])) / max(L, 1e-9)
+            out.append({"kind": kind, "id": ids[n_] if n_ < len(ids) else None, "cls": cls_[n_] if n_ < len(cls_) else None,
+                        "level": _kind(ranges, f, L) or "ground", "d": round(float(d[k]), 1)})
+    out.sort(key=lambda r: r["d"])
+    seen, uniq = set(), []
+    for r in out:
+        if (r["kind"], r["id"]) not in seen:
+            seen.add((r["kind"], r["id"]))
+            uniq.append(r)
+    return uniq[:n]
+
+
+def line_name(r):
+    return f"{r['kind']} {r['id']} ({r['cls']}, {r['level']})"
+
+
+def named_hits(hits, map_l, frame):
+    """Each hit of earth_checks.hit_report named: where (lat, lon), what the vehicle stands on (the map's line under it) and,
+    per class it strikes, the struck triangles' heights against its body and the map's line they belong to (the nearest of
+    that kind: a road's for a road or a deck, a track's for a rail, the nearest road's for ground: whose grading made it).
+    Adds "lat", "lon", "on", "struck"[class]["line"] to each; returns the log lines."""
+    out = []
+    for h in hits:
+        la, lo, _ = frame.enu_to_geodetic(np.array([h["x"]]), np.array([h["y"]]), 0.0)
+        h["lat"], h["lon"] = round(float(np.ravel(la)[0]), 6), round(float(np.ravel(lo)[0]), 6)
+        own = lines_near(map_l, (h["x"], h["y"]), OWN_REACH_M, kinds=("rail",) if h["kind"] == "wagon" else ("road",), n=1)
+        h["on"] = own[0] if own else None
+        parts = []
+        for name, s in (h.get("struck") or {}).items():
+            kinds = ("rail",) if name.startswith("rail") else ("road",)
+            near = lines_near(map_l, (s["x"], s["y"]), kinds=kinds, n=2)
+            if name != "ground":    # (a road or deck struck is another's than the one it stands on; ground may be its own's)
+                near = [r for r in near if not (h["on"] and r["id"] == h["on"]["id"])] or near
+            s["line"] = near[0] if near else None
+            what = name if name != "ground" else "ground"
+            parts.append(f"{what} at x {s['x']} y {s['y']} z {s['z_lo']}..{s['z_hi']} "
+                         f"({h['hits'].get(name, 0)} m into it)"
+                         + (f", {'graded by nearest' if name == 'ground' else 'of'} {line_name(s['line'])} "
+                            f"{s['line']['d']} m off" if s["line"] else ", no map line within "
+                            f"{NAME_REACH_M:g} m"))
+        out.append(f"    {h['kind']} at {h['lat']},{h['lon']} (x {h['x']} y {h['y']}) heading {h['heading']:g}, body "
+                   f"{h['body_base']}..{h['body_top']}, on " + (line_name(h["on"]) if h["on"] else "no map line")
+                   + ": hits " + "; ".join(parts))
+    return out
+
+
+def named_cuts(xings, map_l, frame, box):
+    """The log lines of the crossings whose meshes cut each other (earth_checks.penetrations' (x, y, cut)) in box: where
+    (lat, lon) and the map's lines crossing there."""
+    out = []
+    for c in xings:
+        if not (c[2] and box[0] <= c[0] <= box[2] and box[1] <= c[1] <= box[3]):
+            continue
+        la, lo, _ = frame.enu_to_geodetic(np.array([c[0]]), np.array([c[1]]), 0.0)
+        near = lines_near(map_l, (c[0], c[1]), 3.0, n=4)
+        out.append(f"    cut at {float(np.ravel(la)[0]):.6f},{float(np.ravel(lo)[0]):.6f} (x {c[0]:.1f} y {c[1]:.1f}): "
+                   + ("; ".join(line_name(r) for r in near) or "no map line within 3 m"))
+    return out
+
+
 def limit_at(limits, xy, reach=LIMIT_NEAR_M):
     """m: the lowest height limit whose line (in the frame) passes within reach of xy, or None."""
     hs = [h for line, h in limits if len(line) >= 2 and _dist_to_line(np.asarray(xy, np.float64), line) <= reach]
@@ -961,7 +1047,7 @@ def map_lines(a, frame, box, log, margin=30.0):
         import roads
         xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
         la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
-        out, seen = {"road": [], "rail": [], "road_cls": []}, set()
+        out, seen = {"road": [], "rail": [], "road_cls": [], "road_id": [], "rail_id": [], "rail_cls": []}, set()
         for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
             feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
             if feats is None or not len(feats):
@@ -987,8 +1073,8 @@ def map_lines(a, frame, box, log, margin=30.0):
                     ranges = []
                 for r in rings:
                     out[kind].append((np.asarray(r, np.float64), ranges if len(rings) == 1 else []))
-                    if kind == "road":
-                        out["road_cls"].append(str(cl[i]) if cl is not None else None)
+                    out[kind + "_cls"].append(str(cl[i]) if cl is not None else None)
+                    out[kind + "_id"].append(fid)
         return out, height_limits(a, frame, box, log)
     except Exception as e:      # (the vehicles are then placed from the meshes alone)
         log(f"  map lines not read: {type(e).__name__}: {e}")
@@ -1585,6 +1671,8 @@ def main():
         checks.update(crossings=len(in_box), crossings_cut=earth_checks.count_cut(xings, box))
         log(f"  crossings of the map's lines at different levels: {checks['crossings']}, "
             f"{checks['crossings_cut']} with meshes cutting each other (red)")
+        for line in named_cuts(xings, map_l, frame, box):
+            log(line)
         cls = np.where(cut, CUT, cls).astype(np.int8)
     if not a.no_vehicles:
         if limits:
@@ -1602,9 +1690,8 @@ def main():
         if hits.any():                  # (each one: where, what it cuts, how deep: the cases to analyse)
             checks["hits"] = earth_checks.hit_report(vt[:nv * 12], names, tris[hb], surface[1][hb], hits,
                                                      {k: CLASS_NAME[k].split(" (")[0].split(",")[0] for k in HIT_BY})
-            for h in checks["hits"]:
-                log(f"    {h['kind']} at x {h['x']} y {h['y']} z {h['z']} heading {h['heading']:g}: hits "
-                    + ", ".join(f"{n} by {d} m" for n, d in h["hits"].items()))
+            for line in named_hits(checks["hits"], map_l, frame):
+                log(line)
         log(f"  reference vehicles: {nv} ({nv_t} trucks, {nv - nv_t} wagons), {int(hits.sum())} hitting Earth's geometry not "
             f"their own (yellow)"
             + (f"; {int((vc == MISSING).sum()) // 12} points of the map's roads and railways with nothing drawn under them"
