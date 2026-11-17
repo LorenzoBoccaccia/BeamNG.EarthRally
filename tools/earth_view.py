@@ -1289,6 +1289,13 @@ def earth_version(earth):
         return "?"
 
 
+def block_quantum(info):
+    """m a step of a block's 16-bit heights: its own maxHeight / 65536 (a block whose heights reach past the anchor's
+    range is built on a coarser step than the anchor's q; decoded with the anchor's it stood at half height)."""
+    mh = info.get("maxHeight")
+    return float(mh) / 65536.0 if mh else float(info["q"])
+
+
 def load_block_files(data_dir, aid, cx, cy):
     """(heights (n, n) by row = y, holes (n, n) bool or None, info dict) of a block's files in data_dir."""
     from PIL import Image
@@ -1296,7 +1303,7 @@ def load_block_files(data_dir, aid, cx, cy):
     with open(info_path, encoding="utf-8") as f:
         info = json.load(f)
     png = np.asarray(Image.open(os.path.join(data_dir, f"hm_{aid}_{int(cx)}_{int(cy)}.png")), np.float64)[::-1]
-    z = png * float(info["q"]) + float(info.get("zBase") or 0.0)
+    z = png * block_quantum(info) + float(info.get("zBase") or 0.0)
     holes = None
     terp = os.path.join(data_dir, f"hm_{aid}_{int(cx)}_{int(cy)}_view.ter")
     if os.path.isfile(terp):
@@ -1348,7 +1355,7 @@ def build_earth(a, frame, px, py, log, reach=None):
         info = blockworker.build(a.aid, lat0, lon0, HM_ZOOM, a.q, cx, cy, a.block_size, data_dir, stem + ".png",
                                  ter_name=stem + "_view.ter")
         info = {k: v for k, v in dict(info).items() if isinstance(v, (int, float, str, bool, type(None)))}
-        info["q"] = a.q
+        info.setdefault("q", a.q)
         info["size"] = a.block_size
         with open(os.path.join(data_dir, stem + ".info.json"), "w", encoding="utf-8") as f:
             json.dump(info, f)
