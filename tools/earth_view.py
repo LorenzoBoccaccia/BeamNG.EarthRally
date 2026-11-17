@@ -627,6 +627,12 @@ def along(line, every):
     return out
 
 
+MAX_STEP_M = 5.0                    # m: the most a road's level changes from one vehicle to the next (every 20 m: 25 %): a bigger
+                                    # step is another deck's level (a road under a stack took the highest one's), never taken for a
+                                    # preferred level's sake
+MAX_STEP_PENALTY = 1000.0
+
+
 def _choose(cands, prefs):
     """One level per point of a chain (cands: [levels], prefs: [preferred height or None]): the least sum of the steps between
     consecutive points (1 per m) and of each point's distance from its preferred height (PREF_W per m). None where a point has
@@ -645,7 +651,8 @@ def _choose(cands, prefs):
         for k in range(i + 1, j):
             nc, nb = [], []
             for z in cands[k]:
-                steps = [cost[m] + abs(z - cands[k - 1][m]) for m in range(len(cands[k - 1]))]
+                steps = [cost[m] + abs(z - cands[k - 1][m]) + (MAX_STEP_PENALTY if abs(z - cands[k - 1][m]) > MAX_STEP_M else 0.0)
+                         for m in range(len(cands[k - 1]))]
                 m = int(np.argmin(steps))
                 nc.append(steps[m] + PREF_W * (abs(z - prefs[k]) if prefs[k] is not None else 0.0))
                 nb.append(m)

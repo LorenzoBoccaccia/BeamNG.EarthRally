@@ -232,3 +232,11 @@ def test_a_wagon_lies_along_its_chord_not_the_slope_of_the_3_m_round_it():
     (base, axis), = ev.vehicles_on_lines([(line, [])], ev.Surfaces(np.array(quads, np.float64)), 80.0, top=True, painted=False,
                                          half=ev.WAGON_LWH[0] / 2)
     assert abs(axis[2]) < 0.02, axis
+
+
+def test_a_road_under_a_stack_keeps_its_level_not_the_decks_over_it():
+    # A road at 0 m with a deck 8 m over it at the 6 middle points, the preferred level the highest: the chain stays at the
+    # road's level instead of jumping 8 m up for two points (a truck stood in the deck over its road).
+    cands = [[0.0]] + [[0.0, 8.0]] * 6 + [[0.0]]
+    prefs = [None] + [8.0] * 6 + [None]
+    assert ev._choose(cands, prefs) == [0.0] * 8
