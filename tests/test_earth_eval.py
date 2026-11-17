@@ -150,3 +150,12 @@ def test_the_page_lists_the_worst_junction_first_with_both_sides(tmp_path):
     assert doc.index('id="bad"') < doc.index('id="clean"')
     assert "img/bad.jpg" in doc and (tmp_path / "page" / "img" / "bad.jpg").is_file()
     assert "1 &rarr; <b>5</b>" in doc and "3 &rarr; 5" in doc     # (a row, and the column's totals)
+
+
+def test_a_before_only_capture_builds_no_after_side(tmp_path, monkeypatch):
+    import types
+    built = []
+    monkeypatch.setattr(ee, "build_side", lambda j, side, tree, a, log: built.append(side))
+    a = types.SimpleNamespace(out=str(tmp_path), before="b", after="a", sides=["before"])
+    res = ee.run_junction({"name": "x"}, a, lambda m: None)
+    assert built == ["before"] and "error" not in res

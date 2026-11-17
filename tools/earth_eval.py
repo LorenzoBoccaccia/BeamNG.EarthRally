@@ -274,7 +274,12 @@ def load_surface(path):
 def run_junction(j, a, log):
     log(f"{j['name']}: {j.get('what', '')}")
     res = {"name": j["name"], "what": j.get("what", "")}
-    errs = [e for e in (build_side(j, side, tree, a, log) for side, tree in zip(SIDES, (a.before, a.after))) if e]
+    errs = [e for e in (build_side(j, side, tree, a, log) for side, tree in zip(SIDES, (a.before, a.after))
+                        if side in getattr(a, "sides", SIDES)) if e]
+    if tuple(getattr(a, "sides", SIDES)) == ("before",):      # (a capture of the before side only: no comparison)
+        if errs:
+            res["error"] = "; ".join(errs)
+        return res
     paths = [os.path.join(side_dir(a, j["name"], side), "view_surface.npz") for side in SIDES]
     if errs or not all(os.path.isfile(p) for p in paths):
         res["error"] = "; ".join(errs) or "no surface grid written"
@@ -352,6 +357,9 @@ def main(argv=None):
     ap.add_argument("--reuse", action="store_true", help="draw from the data a former run left (no build)")
     ap.add_argument("--before-from", help="a former run's --out whose before sides are taken as they are (the upstream "
                     "capture): only the after tree is built")
+    ap.add_argument("--sides", default="before,after", help="the sides built: before (a capture for --before-from: no "
+                    "comparison), or before,after")
+    ap.add_argument("--jobs", type=int, default=1, help="junctions built at once (each side its own process)")
     ap.add_argument("--labels", default="before,after", help="the two sides' names on the views, e.g. upstream,latest")
     ap.add_argument("--online", action="store_true", help="fetch the map data the cache lacks")
     ap.add_argument("--no-buildings", action="store_true")
@@ -362,9 +370,15 @@ def main(argv=None):
     a.before, a.after, a.out = os.path.abspath(a.before), os.path.abspath(a.after), os.path.abspath(a.out)
     a.before_from = os.path.abspath(a.before_from) if a.before_from else None
     a.labels = [s.strip() for s in a.labels.split(",")]
+    a.sides = [s.strip() for s in a.sides.split(",") if s.strip()]
+    if a.sides not in (["before"], ["before", "after"]):
+        sys.exit("--sides: before, or before,after")
     if len(a.labels) != 2 or not all(a.labels):
         sys.exit("--labels: two names, before,after")
     os.makedirs(a.out, exist_ok=True)
+
+    if hasattr(sys.stdout, "reconfigure"):      # (the report's arrows on a redirected Windows console: cp1252 could not)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     def log(msg):
         print(msg, flush=True)
@@ -379,7 +393,16 @@ def main(argv=None):
             if unknown:
                 sys.exit(f"not in {a.set}: {', '.join(sorted(unknown))}")
             junctions = [j for j in junctions if j["name"] in want]
-    results = [run_junction(j, a, log) for j in junctions]
+    if a.jobs > 1:                  # (each side is its own earth_view process: junctions side by side)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(a.jobs) as ex:
+            results = list(ex.map(lambda j: run_junction(j, a, lambda m, n=j["name"]: log(f"[{n}] {m.strip()}")), junctions))
+    else:
+        results = [run_junction(j, a, log) for j in junctions]
+    if a.sides == ["before"]:
+        bad = [r["name"] for r in results if r.get("error")]
+        log(f"captured {len(results) - len(bad)} of {len(results)} before sides" + (f"; failed: {', '.join(bad)}" if bad else ""))
+        return 1 if bad else 0
     log(write_report(results, a))
     expect = {s.strip() for s in a.expect.split(",") if s.strip()}
     bad = [r["name"] for r in results if (r.get("changed") or r.get("worse")) and r["name"] not in expect]
