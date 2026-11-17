@@ -240,3 +240,17 @@ def test_a_road_under_a_stack_keeps_its_level_not_the_decks_over_it():
     cands = [[0.0]] + [[0.0, 8.0]] * 6 + [[0.0]]
     prefs = [None] + [8.0] * 6 + [None]
     assert ev._choose(cands, prefs) == [0.0] * 8
+
+
+def test_a_truck_at_the_scenes_edge_lies_on_its_ramp_not_level():
+    """The view's box cuts a 10 % ramp 1.5 m past a truck: its slope from the side the scene has, not flat (held level, a
+    12 m truck stood 0.09 m into its own deck at the box's edge)."""
+    quads = []
+    for x in np.arange(0.0, 31.5, 0.5):
+        z0, z1 = 0.1 * x, 0.1 * (x + 0.5)
+        a, b, c, d = (x, -3.0, z0), (x + 0.5, -3.0, z1), (x + 0.5, 3.0, z1), (x, 3.0, z0)
+        quads += [(a, b, c), (a, c, d)]
+    got = ev.vehicles_on_lines([(np.array([[0.0, 0.0], [60.0, 0.0]]), [])], ev.Surfaces(np.array(quads)), 20.0,
+                               painted=False)
+    edge = [axis for base, axis in got if abs(base[0] - 30.0) < 0.5]
+    assert edge and abs(edge[0][2] - 0.1) < 0.005, got
