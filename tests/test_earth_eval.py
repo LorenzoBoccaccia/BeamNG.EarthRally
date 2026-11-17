@@ -112,3 +112,41 @@ def test_the_report_names_every_junction(tmp_path):
     assert "| x | **changed** |" in table and "| y | error" in table
     data = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert [j["name"] for j in data["junctions"]] == ["x", "y"]
+
+
+def test_the_before_side_comes_from_a_former_run_when_given(tmp_path):
+    import types
+    a = types.SimpleNamespace(out=str(tmp_path / "run"), before_from=str(tmp_path / "upstream"))
+    assert ee.side_dir(a, "x", "before") == os.path.join(a.before_from, "x", "before")
+    assert ee.side_dir(a, "x", "after") == os.path.join(a.out, "x", "after")
+    a.before_from = None
+    assert ee.side_dir(a, "x", "before") == os.path.join(a.out, "x", "before")
+
+
+def test_a_missing_captured_before_side_is_an_error_not_a_build(tmp_path):
+    import types
+    a = types.SimpleNamespace(out=str(tmp_path / "run"), before_from=str(tmp_path / "upstream"))
+    logs = []
+    err = ee.build_side({"name": "x"}, "before", "unused-tree", a, logs.append)
+    assert err and "no before side" in err
+    os.makedirs(tmp_path / "upstream" / "x" / "before")
+    (tmp_path / "upstream" / "x" / "before" / "view_surface.npz").write_bytes(b"")
+    assert ee.build_side({"name": "x"}, "before", "unused-tree", a, logs.append) is None
+
+
+def test_the_page_lists_the_worst_junction_first_with_both_sides(tmp_path):
+    import eval_page
+    from PIL import Image
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = [{"name": "clean", "what": "a", "changed": False, "verdict": "same",
+             "checks": {"vehicles_hit": [2, 0], "crossings_cut": [0, 0]}},
+            {"name": "bad", "what": "b", "changed": True, "worse": ["vehicles_hit"],
+             "checks": {"vehicles_hit": [1, 5], "crossings_cut": [0, 1]}}]
+    (run / "report.json").write_text(json.dumps({"before": str(tmp_path), "after": str(tmp_path), "junctions": rows}))
+    Image.new("RGB", (8, 8)).save(run / "bad.png")
+    page = eval_page.build(str(run), str(tmp_path / "page"))
+    doc = open(page, encoding="utf-8").read()
+    assert doc.index('id="bad"') < doc.index('id="clean"')
+    assert "img/bad.jpg" in doc and (tmp_path / "page" / "img" / "bad.jpg").is_file()
+    assert "1 &rarr; <b>5</b>" in doc and "3 &rarr; 5" in doc     # (a row, and the column's totals)
