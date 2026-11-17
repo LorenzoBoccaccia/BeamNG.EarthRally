@@ -25,7 +25,10 @@ per tree, Earth's plan cache off), then:
 
 A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
 moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did, or got worse, that
-is not in --expect (the junctions the change is about). --reuse draws from the data a former run left (no build), --online
+is not in --expect (the junctions the change is about). --before-from <a former run's out> takes the before sides from
+that run as they are (an upstream capture made once: python tools/earth_eval.py --before <upstream tree> --after <tree>
+--out <capture> --labels upstream,latest; then each run --before-from <capture>, only the after tree built), and
+tools/eval_page.py makes one page of a run. --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
 """
 import argparse
@@ -78,14 +81,27 @@ def junction_args(j):
     return out
 
 
+def side_dir(a, name, side):
+    """Where junction name's side is drawn: <out>/<name>/<side>, the before side <before-from>/<name>/before when given
+    (a former run's, such as the upstream capture: not built again)."""
+    if side == "before" and getattr(a, "before_from", None):
+        return os.path.join(a.before_from, name, "before")
+    return os.path.join(a.out, name, side)
+
+
 def build_side(j, side, tree, a, log):
-    """Draw junction j from Earth tree into <out>/<name>/<side> (earth_view, its own process). Returns the error or None."""
-    out = os.path.join(a.out, j["name"], side)
+    """Draw junction j from Earth tree into its side's folder (side_dir; earth_view, its own process). Returns the error or
+    None. The before side taken from --before-from is not built: an error if that run has no such junction."""
+    out = side_dir(a, j["name"], side)
+    if side == "before" and getattr(a, "before_from", None):
+        ok = os.path.isfile(os.path.join(out, "view_surface.npz"))
+        log(f"  {side}: from {out}" + ("" if ok else ", missing"))
+        return None if ok else f"no before side in {out} (capture it: earth_eval.py --out {a.before_from} ...)"
     os.makedirs(out, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "earth_view.py"), "--earth", tree, "--out", out, "--name", "view", "--dump",
-           "--label-prefix", f"{side}: ", "--image", a.image, "--views", a.views] + junction_args(j)
+           "--label-prefix", f"{a.labels[SIDES.index(side)]}: ", "--image", a.image, "--views", a.views] + junction_args(j)
     if side == "after":         # (the overview marks the ground that moved since before)
-        cmd += ["--compare-data", os.path.join(a.out, j["name"], "before", "data")]
+        cmd += ["--compare-data", os.path.join(side_dir(a, j["name"], "before"), "data")]
     for flag in ("reuse", "online", "no_buildings"):
         if getattr(a, flag):
             cmd.append("--" + flag.replace("_", "-"))
@@ -212,7 +228,7 @@ def eval_picture(j, a, res, log):
     panels = []
     for side in SIDES:
         for v in views:
-            p = os.path.join(a.out, j["name"], side, f"view_panel_{ev.view_name(v)}.png")
+            p = os.path.join(side_dir(a, j["name"], side), f"view_panel_{ev.view_name(v)}.png")
             panels.append(Image.open(p).convert("RGB") if os.path.isfile(p) else grey())
     sub = verdict_line(res) + f"      before: {os.path.basename(a.before)}   after: {os.path.basename(a.after)}"
     title = f"{j['name']}: {j.get('what', '')}"
@@ -259,7 +275,7 @@ def run_junction(j, a, log):
     log(f"{j['name']}: {j.get('what', '')}")
     res = {"name": j["name"], "what": j.get("what", "")}
     errs = [e for e in (build_side(j, side, tree, a, log) for side, tree in zip(SIDES, (a.before, a.after))) if e]
-    paths = [os.path.join(a.out, j["name"], side, "view_surface.npz") for side in SIDES]
+    paths = [os.path.join(side_dir(a, j["name"], side), "view_surface.npz") for side in SIDES]
     if errs or not all(os.path.isfile(p) for p in paths):
         res["error"] = "; ".join(errs) or "no surface grid written"
     else:
@@ -271,7 +287,7 @@ def run_junction(j, a, log):
             W, H = (int(v) for v in a.image.lower().split("x"))
             res["_diff"] = diff_image(sb, sa, W, H)
             res["_used"] = sorted(set(ub) | set(ua))
-    res.update(compare_checks(*(load_checks(os.path.join(a.out, j["name"], side, "view_checks.json")) for side in SIDES)))
+    res.update(compare_checks(*(load_checks(os.path.join(side_dir(a, j["name"], side), "view_checks.json")) for side in SIDES)))
     res["picture"] = eval_picture(j, a, res, log)
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
@@ -334,6 +350,9 @@ def main(argv=None):
                     "overview,top,SW: 3 x 2 with before and after")
     ap.add_argument("--image", default=PANEL, help="one view's pixels, WxH")
     ap.add_argument("--reuse", action="store_true", help="draw from the data a former run left (no build)")
+    ap.add_argument("--before-from", help="a former run's --out whose before sides are taken as they are (the upstream "
+                    "capture): only the after tree is built")
+    ap.add_argument("--labels", default="before,after", help="the two sides' names on the views, e.g. upstream,latest")
     ap.add_argument("--online", action="store_true", help="fetch the map data the cache lacks")
     ap.add_argument("--no-buildings", action="store_true")
     ap.add_argument("--cache", help="Earth's map data cache (earth_view's default otherwise)")
@@ -341,6 +360,10 @@ def main(argv=None):
     ap.add_argument("--expect", default="", help="comma list of the junctions the change is about")
     a = ap.parse_args(ev.joined_pairs(sys.argv[1:] if argv is None else argv, ("--at",)))
     a.before, a.after, a.out = os.path.abspath(a.before), os.path.abspath(a.after), os.path.abspath(a.out)
+    a.before_from = os.path.abspath(a.before_from) if a.before_from else None
+    a.labels = [s.strip() for s in a.labels.split(",")]
+    if len(a.labels) != 2 or not all(a.labels):
+        sys.exit("--labels: two names, before,after")
     os.makedirs(a.out, exist_ok=True)
 
     def log(msg):
