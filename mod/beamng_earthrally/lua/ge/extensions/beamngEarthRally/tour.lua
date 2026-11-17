@@ -16,9 +16,9 @@
 --   ctx.nodes()                   the navgraph's nodes (map.getMap().nodes) or nil
 --   ctx.car()                     { pos = {x, y, z}, speed = m/s } of the player's car or nil
 --   ctx.place(pos, dir)           put the car at pos ({x, y, z}) facing dir ({x, y})
---   ctx.drive(names, dest, label) Earth's GPS to dest ({lat, lon}) and its autodrive on (without Earth's GPS: the AI
---                                 drives the nodes); ctx.arrived(): the GPS has let go (it clears itself on arrival)
---   ctx.stopAi()                  the drive off, the car braked; ctx.releaseAi() gives the car back to the player
+--   ctx.drive(names, dest, label) Earth's GPS to dest ({lat, lon}) and Earth's autodrive on (no driving of ours);
+--                                 ctx.arrived(): the GPS has let go (it clears itself on arrival)
+--   ctx.stopAi()                  Earth's autodrive off
 --   ctx.gpsClear()
 --   ctx.say(msg, seconds), ctx.log(level, msg)
 local M = {}
@@ -201,7 +201,6 @@ function M.stop(why)
   if not T then return end
   local ctx = T.ctx
   pcall(ctx.stopAi)
-  if ctx.releaseAi then pcall(ctx.releaseAi) end      -- (the car the player's again)
   pcall(ctx.gpsClear)
   ctx.log('I', 'junction tour stopped: ' .. tostring(why))
   T = nil

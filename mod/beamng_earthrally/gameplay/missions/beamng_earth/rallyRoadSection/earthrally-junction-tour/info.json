@@ -1,0 +1,77 @@
+{
+  "additionalAttributes": {},
+  "author": "BeamNG",
+  "careerSetup": {
+    "defaultStarKeys": {},
+    "showInFreeroam": true,
+    "skill": "(none)",
+    "starOutroTexts": {},
+    "starRewards": {},
+    "starsActive": {}
+  },
+  "customAdditionalAttributes": {},
+  "date": 1762151107,
+  "description": "The eval junctions one after the other, for one recording: the car is put before each, Earth's GPS set through it and Earth's autodrive on; at the end of each the next.",
+  "devMission": false,
+  "grouping": {
+    "id": "",
+    "label": ""
+  },
+  "layers": [
+    {
+      "dir": "/gameplay/missions/beamng_earth/rallyRoadSection/earthrally-junction-tour/",
+      "fixed": true,
+      "isMissionFolderDir": true,
+      "isMissionTypeDir": false
+    },
+    {
+      "dir": "/gameplay/missionTypes/rallyRoadSection/",
+      "fixed": true,
+      "isMissionFolderDir": false,
+      "isMissionTypeDir": true
+    }
+  ],
+  "missionType": "rallyRoadSection",
+  "missionTypeData": {
+    "earthRallyTour": true
+  },
+  "name": "EarthRally: junction tour",
+  "retryBehaviour": "infiniteRetries",
+  "setupModules": {
+    "environment": {
+      "enabled": false
+    },
+    "traffic": {
+      "enabled": false
+    },
+    "vehicles": {
+      "enabled": true,
+      "includePlayerVehicle": true,
+      "playerVehicleDiffs": {},
+      "prioritizePlayerVehicle": true,
+      "vehicles": {}
+    }
+  },
+  "startCondition": {
+    "type": "always"
+  },
+  "startTrigger": {
+    "level": "beamng_earth",
+    "pos": [
+      0,
+      0,
+      0
+    ],
+    "radius": 3,
+    "rot": [
+      0,
+      0,
+      0,
+      1
+    ],
+    "type": "coordinates"
+  },
+  "visibleCondition": {
+    "type": "always"
+  }
+}
