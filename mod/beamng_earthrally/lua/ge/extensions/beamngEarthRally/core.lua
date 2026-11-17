@@ -17,6 +17,10 @@
 --   beamngEarthRally_core.setAdapt(true)             at a rebase, move the rally race path with Earth's transform (experiment)
 --   beamngEarthRally_core.setShaping(false)          the transient ground shaping along the stages (on by default)
 --   beamngEarthRally_core.status()
+--   beamngEarthRally_core.tour()                     the junction tour: the eval junctions (tools/junctions.json) one after
+--                                              the other, the car teleported to each, Earth's GPS set through it and
+--                                              the AI driving it (tour.lua), for one recording; tour('name') from one on
+--   beamngEarthRally_core.tourStop()
 -- Every rebase writes EARTHRALLY-PROBE lines to the game log: where the rally data is before and after, against the lat/lon truth.
 local M = {}
 M.dependencies = { 'ui_imgui' }
@@ -34,7 +38,9 @@ local earthapi = require('beamngEarthRally/earthapi')
 local hud = require('beamngEarthRally/hud')
 local guide = require('beamngEarthRally/guide')
 local days = require('beamngEarthRally/days')
+local tour = require('beamngEarthRally/tour')
 
+local JUNCTIONS_FILE = '/earthrally/junctions.json'           -- the eval junctions (tools/install.py copies tools/junctions.json)
 local EDITIONS_DIR = '/earthrally/editions/'                  -- in the mod (tools/install.py copies editions/ there)
 local MISSIONS_DIR = '/gameplay/missions/beamng_earth/'  -- mission ids are <level>/<type>/<name>; the level is Earth's
 local DEFAULT_EDITION = 'testbed-algarve'
@@ -1462,6 +1468,7 @@ function M.onAnchor(lat, lon)
   local geodesy = require('beamngEarth/geodesy')
   local old = st.anchor
   st.anchor = geodesy.newAnchor(lat, lon)
+  pcall(tour.onAnchor)
 
   local rb = st.rebase
   if rb then
@@ -1735,6 +1742,12 @@ local function drawWindow()
   im.SetNextWindowPos(im.ImVec2(20, 120), im.Cond_FirstUseEver)
   if im.Begin('BeamNG.EarthRally') then
     im.Text('State: ' .. st.phase .. '   rebases seen: ' .. st.rebases)
+    if tour.running() then
+      im.Text('Junction tour ' .. tostring(tour.status()))
+      if im.Button('Stop the junction tour') then M.tourStop() end
+    elseif st.phase == 'idle' and im.Button('Junction tour: the AI drives the eval junctions') then
+      M.tour()
+    end
     if st.anchor then im.Text(string.format('Anchor: %.4f, %.4f', st.anchor.lat, st.anchor.lon)) end
     local n = 0
     for _ in pairs(scenery.objs) do n = n + 1 end
@@ -2251,6 +2264,106 @@ local function missionsTick()
   if st.markersWaiting[1] and st.phase ~= 'running' then groundWaitingMarkers() end
 end
 
+-- The junction tour's hands in the game (tour.lua's ctx).
+local function tourCtx()
+  local function veh() return getPlayerVehicle and getPlayerVehicle(0) or nil end
+  return {
+    anchor = function() return st.anchor end,
+    ready = function() return earthapi.ready() end,
+    teleport = function(lat, lon, name) return earthapi.teleport(lat, lon, name) end,
+    roadsReady = function(x, y, r)
+      local es = earthState()
+      local roads = earthModule('roads')
+      if not (es and es.anchorId and roads and roads.readyAround) then return true end
+      return roads.readyAround(es.anchorId, x, y, r) and true or false
+    end,
+    nodes = function()
+      local ok, m = pcall(function() return map and map.getMap and map.getMap() end)
+      return ok and m and m.nodes or nil
+    end,
+    car = function()
+      local v = veh()
+      if not v then return nil end
+      local p = v:getPosition()
+      local speed = 0
+      if v.getVelocity then
+        local ok, vel = pcall(v.getVelocity, v)
+        if ok and vel and vel.x then speed = math.sqrt(vel.x * vel.x + vel.y * vel.y) end
+      end
+      return { pos = { x = p.x, y = p.y, z = p.z }, speed = speed }
+    end,
+    place = function(pos, dir)
+      local v = veh()
+      if not v then return end
+      local rot = quatFromDir(vec3(dir.x, dir.y, 0):normalized(), vec3(0, 0, 1))
+      if spawn and spawn.safeTeleport then
+        spawn.safeTeleport(v, vec3(pos.x, pos.y, pos.z), rot, nil, nil, nil, true)
+      else
+        v:setPositionRotation(pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w)
+      end
+      v:queueLuaCommand('recovery.clear()')
+    end,
+    -- Earth's GPS to the drive's end and its autodrive on (its route on the map, the arrows, the car's AI in its lane at
+    -- the legal speed, unstuck when it stalls); without Earth's GPS module the AI drives the picked nodes itself
+    drive = function(names, dest, label)
+      local g = earthModule('gps')
+      if dest and g and g.setDestination and g.setAutodrive then
+        g.setDestination(dest.lat, dest.lon, label)
+        g.setAutodrive(true)
+        return
+      end
+      local v = veh()
+      if not v then return end
+      local q = {}
+      for i, n in ipairs(names) do q[i] = string.format('%q', tostring(n)) end
+      v:queueLuaCommand(string.format("ai.driveUsingPath({wpTargetList = {%s}, noOfLaps = 1, routeSpeedMode = 'legal', "
+        .. "driveInLane = 'on', avoidCars = 'on', aggression = 0.3})", table.concat(q, ', ')))
+    end,
+    arrived = function()
+      local g = earthModule('gps')
+      return g and g.autodrive and not g.autodrive() and not earthapi.gpsActive() or false
+    end,
+    stopAi = function()
+      local g = earthModule('gps')
+      if g and g.setAutodrive then pcall(g.setAutodrive, false) end
+      local v = veh()
+      if v then v:queueLuaCommand("ai.setMode('stop')") end
+    end,
+    releaseAi = function()
+      local v = veh()
+      if v then v:queueLuaCommand("ai.setMode('disabled')") end
+    end,
+    gpsClear = function() return earthapi.gpsClear() end,
+    say = function(msg, seconds) earthapi.notify(msg, seconds) end,
+    log = function(level, msg) ownLog(level, msg) end,
+  }
+end
+
+-- The junction tour (tour.lua): every junction of earthrally/junctions.json, from the one named from on.
+function M.tour(from)
+  if tour.running() then return 'a tour is running: tourStop() first' end
+  local set = jsonReadFile(JUNCTIONS_FILE)
+  local list = tour.fromSet(set, require('beamngEarth/geodesy'))
+  if from then
+    for i, j in ipairs(list) do
+      if j.name == from then
+        local rest = {}
+        for k = i, #list do rest[#rest + 1] = list[k] end
+        list = rest
+        break
+      end
+    end
+  end
+  if #list == 0 then
+    ownLog('E', 'junction tour: no junctions in ' .. JUNCTIONS_FILE)
+    return 'no junctions in ' .. JUNCTIONS_FILE
+  end
+  tour.start(tourCtx(), list)
+  return string.format('junction tour: %d junctions, from %s', #list, list[1].name)
+end
+
+function M.tourStop() tour.stop('stopped') end
+
 function M.status()
   return dumps({ phase = st.phase, edition = st.edition and st.edition.edition, rebases = st.rebases, adapt = st.adapt,
     shaping = shaper and shaper:status() or nil, preload = st.preload and st.preload:state() or nil,
@@ -2262,6 +2375,10 @@ end
 
 function M.onUpdate(dt)
   st.clock = st.clock + dt
+  if tour.running() then
+    local okT, errT = pcall(tour.update, dt)
+    if not okT then ownLog('E', 'junction tour failed: ' .. tostring(errT)); tour.stop('error') end
+  end
   pcall(drawWindow)
   pcall(drawHud)
   local ok, err = pcall(sceneryTick)

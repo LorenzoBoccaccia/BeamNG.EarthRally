@@ -31,6 +31,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MOD_SRC = os.path.join(ROOT, "mod", "beamng_earthrally")
 EDITIONS = os.path.join(ROOT, "editions")
+JUNCTIONS = os.path.join(ROOT, "tools", "junctions.json")
 NAME = "beamng_earthrally"
 # the add-on's file in the mods folder: Earth's Add-ons page names it after the repository (addons.py: <id>.zip, the id
 # the repository's name in lower case), and finds the release's file by its .zip ending
@@ -83,6 +84,8 @@ def install_links(dst):
     os.makedirs(os.path.join(dst, "earthrally"))
     make_link(EDITIONS, os.path.join(dst, "earthrally", "editions"))
     print("  link earthrally/editions")
+    shutil.copy2(JUNCTIONS, os.path.join(dst, "earthrally", "junctions.json"))     # (a copy: install again after editing it)
+    print("  copy earthrally/junctions.json")
     for rel, src in NOTICES:
         shutil.copy2(src, os.path.join(dst, rel))
 
@@ -97,6 +100,7 @@ def mod_files():
             src = os.path.join(base, n)
             out.append((os.path.relpath(src, MOD_SRC).replace(os.sep, "/"), src))
     out += NOTICES                                               # the licence and the data credits go with the mod
+    out.append(("earthrally/junctions.json", JUNCTIONS))       # the eval junctions: the junction tour drives them (tour.lua)
     for ed in sorted(os.listdir(EDITIONS)):
         src = os.path.join(EDITIONS, ed)
         if not os.path.isfile(os.path.join(src, "legs.json")):
