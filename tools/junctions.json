@@ -22,6 +22,11 @@
     {"name": "barcelona_trench", "what": "Barcelona: a main road in a trench under perforated canopy covers, street-level side roads and parking right beside it (the user's in-game report)", "at": [41.411868, 2.198433], "radius": 80},
     {"name": "fuji_bridge_gap", "what": "Mt Fuji, Subaru Line: a 23 m bridge on a 24 km road (dropped as a sliver of it: a hole in the road; the user's in-game report)", "at": [35.392761, 138.723402], "radius": 60},
     {"name": "fuji_snow_shed", "what": "Mt Fuji, Subaru Line: a 90 m snow shed (tunnel=avalanche_protector) under a hill, the route's arrows on its roof (the user's in-game report)", "at": [35.393581, 138.72825], "radius": 60},
-    {"name": "fuji_lot_junction", "what": "Mt Fuji, Subaru Line's 5th station: the secondary road ending on the middle of the lot's service loop, a 0.7 m ridge (the user's in-game report)", "at": [35.394873, 138.731791], "radius": 60}
+    {"name": "fuji_lot_junction", "what": "Mt Fuji, Subaru Line's 5th station: the secondary road ending on the middle of the lot's service loop, a 0.7 m ridge (the user's in-game report)", "at": [35.394873, 138.731791], "radius": 60},
+    {"name": "popoli_a25_tubes", "what": "Popoli: the stage road over the A25's twin tubes, the ground over a covered tunnel (a drive-before-merging site)",
+     "anchor": [42.17, 13.83], "aid": 2, "q": 0.015625, "at": [42.1777, 13.8268], "radius": 60},
+    {"name": "vienna_a23", "what": "Vienna: the A23 over Erzherzog-Karl-Strasse, its tube (a drive-before-merging site)", "at": [48.22963, 16.45307], "radius": 60},
+    {"name": "casagranda_bridge", "what": "Galleria Casagranda: a bridge between two tunnels, a large incline (Earth drivability site)", "at": [45.86134, 10.83268], "radius": 60},
+    {"name": "casagranda_portal", "what": "Galleria Casagranda: a tunnel's portal (Earth drivability site)", "at": [45.85964, 10.83267], "radius": 60}
   ]
 }
