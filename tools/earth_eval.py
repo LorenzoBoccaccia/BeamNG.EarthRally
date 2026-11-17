@@ -359,7 +359,9 @@ def timing_rows(results):
     if tb:
         rows.append(f"| **total** | {tb:.0f} | {ta:.0f} | {100.0 * (ta - tb) / tb:+.0f} % | {ts:.0f} |")
     rows += ["", "Earth's own build of the place (the block and its road tiles); the solver passes' time is what the "
-                 "interchange shapes and the road laws logged, summed over their cells. A side reused from an earlier run "
+                 "interchange shapes and the road laws logged, summed over their cells and worker processes (CPU time: it can exceed "
+                 "the wall time). Comparable when both sides are built in the same run, one junction at a time (--jobs 1), "
+                 "with warm caches. A side reused from an earlier run "
                  "has the timing of that run (none before this table existed)."]
     return rows
 

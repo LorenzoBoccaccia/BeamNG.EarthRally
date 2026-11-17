@@ -106,16 +106,18 @@ def build(run, out):
         ch = 100.0 * (a_ - b) / b
         trows.append(f'<tr><td>{e(r["name"])}</td><td>{b:.0f} s</td><td><b>{a_:.0f} s</b></td>'
                      f'<td class="{"bad" if ch > 10 else "good" if ch < -10 else ""}"><b>{ch:+.0f} %</b></td>'
-                     f'<td>{(s or 0.0):.0f} s ({100.0 * (s or 0.0) / a_:.0f} %)</td></tr>')
+                     f'<td>{(s or 0.0):.0f} s</td></tr>')
     if trows:
         ch = 100.0 * (ta - tb) / tb
         timing = (f'<h2>Build time: upstream &rarr; latest</h2><p><b>{tb:.0f} s &rarr; {ta:.0f} s ({ch:+.0f} %)</b> over '
-                  f'{len(trows)} junctions; the new solver passes (interchange shapes, road laws) {ts:.0f} s of it '
-                  f'({100.0 * ts / ta:.0f} %).</p><div class="wrap"><table><thead><tr><th>junction</th><th>upstream</th>'
-                  f'<th>latest</th><th>change</th><th>solver passes (share of latest)</th></tr></thead><tbody>'
+                  f'{len(trows)} junctions; the new solver passes (interchange shapes, road laws) logged {ts:.0f} s '
+                  f'of CPU time.</p><div class="wrap"><table><thead><tr><th>junction</th><th>upstream</th>'
+                  f'<th>latest</th><th>change</th><th>solver passes (CPU)</th></tr></thead><tbody>'
                   f'{"".join(trows)}</tbody></table></div><p class="mute">Earth\'s own build of each place (its terrain '
                   f'block and road tiles), both sides built in the same run on the same machine; the solver time is '
-                  f'what those passes logged, summed over their cells.</p>')
+                  f'what those passes logged, summed over their cells and worker processes (CPU time: it can exceed the '
+                  f'wall time of the build where the cells are planned in parallel). Built one junction at a time, after a '
+                  f'run that warmed the caches of both sides, for comparable numbers.</p>')
     else:
         timing = '<p class="mute">No build times in this run (a side reused from an earlier run has none).</p>'
     secs = []
