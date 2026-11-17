@@ -839,7 +839,13 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
                 lv = surface_levels(surf, q, t, top)
                 near = min(lv, key=lambda v: abs(v - z)) if lv else None
                 zs.append(near if near is not None and abs(near - z) <= level else None)
-            slope = (zs[0] - zs[1]) / (2 * look) if None not in zs else 0.0
+            if None not in zs:
+                slope = (zs[0] - zs[1]) / (2 * look)
+            elif zs != [None, None]:        # (one side off the scene, the view's edge: its slope from the side it has,
+                # not flat: a 12 m truck held level on a 10 % ramp at the box's edge stood 0.09 m into its own deck)
+                slope = (zs[0] - z) / look if zs[0] is not None else (z - zs[1]) / look
+            else:
+                slope = 0.0
             chosen.append((probe, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
     for probe, base, axis in sorted(chosen, key=lambda c: not c[0]):        # (the probes first)
         if len(placed):
