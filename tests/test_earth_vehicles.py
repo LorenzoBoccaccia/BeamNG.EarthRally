@@ -199,3 +199,36 @@ def test_a_truck_stands_at_every_crossing_under_a_bridge_or_a_railway():
 def test_a_short_tunnel_is_open_ground_a_long_one_is_not():
     assert ev._kind([(0.4, 0.5, "tunnel")], 0.45, 100.0) is None
     assert ev._kind([(0.0, 0.8, "tunnel")], 0.45, 100.0) == "tunnel"
+
+# ---- a wagon on its rails' heads, lying along its chord ------------------------------------------------------------------------
+def rect(x0, x1, y0, y1, z):
+    """One flat rectangle (two triangles), facing up."""
+    a, b, c, d = (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)
+    return np.array([(a, b, c), (a, c, d)], np.float64)
+
+
+def test_a_wagon_stands_on_its_rails_heads_not_on_the_sleepers_or_ballast_between_them():
+    """Earth's track: ballast, rails 0.16 over the sleepers, their heads 0.07 wide at +-0.7525 m. The point on the line itself
+    reads the ballast (or a sleeper's top), 0.28 m under the heads a wagon's wheels ride on: a deck's wall 0.42 m over the head
+    (Birmingham's, Perth's freeway deck) then stood in a body that starts 0.5 m over the wheels (earth_checks.BODY_BASE_M)."""
+    import earth_checks
+    track = np.concatenate([rect(0, 80, -1.8, 1.8, 0.0), rect(0, 80, 0.7175, 0.7875, 0.28), rect(0, 80, -0.7875, -0.7175, 0.28)])
+    wall = rect(0, 80, 1.4, 2.4, 0.28 + 0.42)                         # (the neighbour's deck wall's top: 0.42 over the heads)
+    line = np.array([[0.0, 0.0], [80.0, 0.0]])
+    (base, axis), = ev.vehicles_on_lines([(line, [])], ev.Surfaces(track), 80.0, top=True, painted=False, half=ev.WAGON_LWH[0] / 2)
+    assert abs(base[2] - 0.28) < 0.01, base
+    wagon = ev.box_triangles(base, axis, *ev.WAGON_LWH)
+    assert not earth_checks.vehicle_hits(wagon, wall)[0]
+
+
+def test_a_wagon_lies_along_its_chord_not_the_slope_of_the_3_m_round_it():
+    """A 0.25 m step in the track over 6 m (a deck's end, a dip) is +-4 % within 3 m of it, 1.25 % over the wagon's 20 m."""
+    quads = []
+    for x in np.arange(0.0, 80.0, 0.5):
+        z0, z1 = [0.28 + 0.25 * np.clip((v - 37.0) / 6.0, 0.0, 1.0) for v in (x, x + 0.5)]
+        a, b, c, d = (x, -1.8, z0), (x + 0.5, -1.8, z1), (x + 0.5, 1.8, z1), (x, 1.8, z0)
+        quads += [(a, b, c), (a, c, d)]
+    line = np.array([[0.0, 0.0], [80.0, 0.0]])
+    (base, axis), = ev.vehicles_on_lines([(line, [])], ev.Surfaces(np.array(quads, np.float64)), 80.0, top=True, painted=False,
+                                         half=ev.WAGON_LWH[0] / 2)
+    assert abs(axis[2]) < 0.02, axis

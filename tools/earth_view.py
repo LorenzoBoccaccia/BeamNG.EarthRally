@@ -533,7 +533,9 @@ def limit_at(limits, xy, reach=LIMIT_NEAR_M):
 
 MISSING_EVERY_M = 5.0               # m between the red posts along a map line with nothing under it
 MISSING_POST = (0.6, 0.6, 6.0)      # m: a post's side, side and height
-LOOK_M = 3.0                        # m ahead and behind a vehicle its slope is read
+LOOK_M = 3.0                        # m ahead and behind a vehicle its slope is read (a wagon's: half its length, its chord)
+RAIL_SIDES_M = tuple(0.5 + 0.05 * k for k in range(8))     # m either side of a track's line its rails' heads are looked for (0.5-0.85:
+                                    # a narrow gauge's 0.5 to a broad gauge's 0.83; heads 0.07 wide): a wagon's wheels ride on them
 LEVEL_MERGE_M = 1.0                 # m: surfaces under a point this close are one level (a road mesh on its deck, rails on
                                     # their sleepers on their ballast)
 PREF_W = 0.5                        # the weight of a point's preferred level (its line's bridge / tunnel / ground) against its
@@ -589,6 +591,20 @@ def levels(z, top=False, merge=LEVEL_MERGE_M):
             run = [float(v)]
     out.append(max(run) if top else float(np.median(run)))
     return out
+
+
+def surface_levels(surf, p, t, top=False):
+    """levels(surf.heights(p), top) of the point p (2,) of a line going along t (2,). With top (a track) the heights at
+    RAIL_SIDES_M either side across the line too: the level is then a rail head's, which a wagon's wheels ride on, not the sleepers'
+    top between the rails (0.16 m lower; the point on the line itself reads them, or the ballast between two sleepers 0.1-0.2 m
+    lower still): a wagon stood 0.16-0.3 m low, so a deck's wall 0.42 m over the rail head (Birmingham's, 3.1 m from the track
+    next to it) or a freeway's deck 0.43 over it stood in its body, which starts 0.5 m over its wheels."""
+    z = surf.heights(*p)
+    if top:
+        n = np.array([-t[1], t[0]])
+        z = np.sort(np.concatenate([z] + [surf.heights(*(p + s * n)) for s in RAIL_SIDES_M]
+                                   + [surf.heights(*(p - s * n)) for s in RAIL_SIDES_M]))
+    return levels(z, top)
 
 
 def along(line, every):
@@ -764,7 +780,8 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
     - a tunnel stretch: none (in its tube); one SHORT_TUNNEL_M or shorter is ground (Earth opens it).
     probes: per line, the fractions where it crosses under a bridge or a railway (crossings_under): a vehicle stands there
     first, the ones every metres around it.
-    Its slope from the same surface LOOK_M ahead and behind. None within 0.75 * every of one placed on the same level (copies
+    Its slope from the same surface LOOK_M ahead and behind (a wagon, top and half: half its length, its rigid body's chord: a
+    0.25 m step in the track read +-4 % over 6 m, tilted a 20 m wagon's end 0.5 m into the rails ahead). None within 0.75 * every of one placed on the same level (copies
     of one road, segments end to end). box (x0, y0, x1, y1): only points inside it (the view)."""
     placed = np.zeros((0, 3))
     heads = np.zeros((0, 2))
@@ -783,7 +800,7 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
         if half:                    # (a rigid vehicle on a bend: along its chord, chord_pose)
             pts = [(*chord_pose(xy, f * L, half), f, pr) for _p, _t, f, pr in pts]
         cands, prefs, kinds = [], [], []
-        for p, _t, f, _pr in pts:
+        for p, t_, f, _pr in pts:
             kind = _kind(ranges, f, L)
             g = float(ground(*p)) if ground is not None else None
             if box is not None and not (box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]):
@@ -793,10 +810,10 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
             elif kind != "bridge" and painted and g is not None:
                 lv, pref = [g], None
             elif kind == "bridge":
-                lv = [v for v in levels(surf.heights(*p), top) if g is None or v >= g - DECK_UNDER_M]
+                lv = [v for v in surface_levels(surf, p, t_, top) if g is None or v >= g - DECK_UNDER_M]
                 pref = max(lv) if lv else None
             else:
-                lv = levels(surf.heights(*p), top)
+                lv = surface_levels(surf, p, t_, top)
                 pref = g if lv else None
             cands.append(lv)
             prefs.append(pref)
@@ -805,15 +822,16 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
             if z is None:
                 continue
             zs = []
-            for d in (LOOK_M, -LOOK_M):
+            look = half if half and top else LOOK_M          # (a wagon lies on its chord: its pitch over its own length)
+            for d in (look, -look):
                 q = p + d * t
                 if kind != "bridge" and painted and ground is not None:
                     zs.append(float(ground(*q)))
                     continue
-                lv = levels(surf.heights(*q), top)
+                lv = surface_levels(surf, q, t, top)
                 near = min(lv, key=lambda v: abs(v - z)) if lv else None
                 zs.append(near if near is not None and abs(near - z) <= level else None)
-            slope = (zs[0] - zs[1]) / (2 * LOOK_M) if None not in zs else 0.0
+            slope = (zs[0] - zs[1]) / (2 * look) if None not in zs else 0.0
             chosen.append((probe, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
     for probe, base, axis in sorted(chosen, key=lambda c: not c[0]):        # (the probes first)
         if len(placed):
