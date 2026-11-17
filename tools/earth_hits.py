@@ -50,7 +50,7 @@ def table(results):
     out = rows + [""]
     for r in results:
         for h in r["hits"]:
-            out.append(f"- {r['name']}: {h['kind']} at x {h['x']} y {h['y']} z {h['z']} heading {h['heading']:g}: "
+            out.append(f"- {r['name']}: {h['kind']} at x {h['x']} y {h['y']} z {h['z']} heading {h['heading']:g}: hits "
                        + ", ".join(f"{n} by {d} m" for n, d in h["hits"].items()))
     return "\n".join(out) + "\n"
 
