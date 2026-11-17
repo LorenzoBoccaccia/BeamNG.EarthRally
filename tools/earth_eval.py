@@ -35,6 +35,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -271,6 +272,36 @@ def load_surface(path):
         return (f["cls"], f["z"]), [int(u) for u in f["used"]]
 
 
+SOLVER_LINES = ((re.compile(r"grading: road laws .*, ([0-9.]+) s\s*$"), "laws_s"),
+                (re.compile(r"grading: SHAPES pid \d+ region .*find ([0-9.]+) s, solve ([0-9.]+) s"), "shapes_s"))
+
+
+def load_timing(side):
+    """{block_s, tiles_s, tiles, build_s, laws_s, shapes_s, solver_s} of a side's folder: Earth's build time
+    (data/timing.json, written by earth_view when it built the place) and the time the interchange shapes and the road
+    laws logged in its view.log (summed over their cells and regions: a share of the build); {} without a timing."""
+    t = {}
+    try:
+        with open(os.path.join(side, "data", "timing.json"), encoding="utf-8") as f:
+            t = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    t["build_s"] = round(float(t.get("block_s", 0.0)) + float(t.get("tiles_s", 0.0)), 2)
+    sums = {"laws_s": 0.0, "shapes_s": 0.0}
+    try:
+        with open(os.path.join(side, "view.log"), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                for rx, k in SOLVER_LINES:
+                    m = rx.search(line)
+                    if m:
+                        sums[k] += sum(float(g) for g in m.groups())
+    except OSError:
+        pass
+    t.update({k: round(v, 2) for k, v in sums.items()})
+    t["solver_s"] = round(sums["laws_s"] + sums["shapes_s"], 2)
+    return t
+
+
 def run_junction(j, a, log):
     log(f"{j['name']}: {j.get('what', '')}")
     res = {"name": j["name"], "what": j.get("what", "")}
@@ -293,6 +324,7 @@ def run_junction(j, a, log):
             res["_diff"] = diff_image(sb, sa, W, H)
             res["_used"] = sorted(set(ub) | set(ua))
     res.update(compare_checks(*(load_checks(os.path.join(side_dir(a, j["name"], side), "view_checks.json")) for side in SIDES)))
+    res["timing"] = {side: load_timing(side_dir(a, j["name"], side)) for side in SIDES}
     res["picture"] = eval_picture(j, a, res, log)
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
@@ -308,6 +340,28 @@ def flagged_junctions(results):
         if what:
             out.append((r["name"], what))
     return sorted(out, key=lambda t: -sum(v for _n, v in t[1]))
+
+
+def timing_rows(results):
+    """The report's build time table: per junction Earth's build time before and after, its change, and the share of the
+    after side's the solver passes logged; the totals over the junctions both sides have a timing of."""
+    rows = ["## Build time", "", "| junction | before (s) | after (s) | change | solver passes after (s) |", "|---|---|---|---|---|"]
+    tb = ta = ts = 0.0
+    for r in results:
+        t = r.get("timing") or {}
+        b, a_ = (t.get("before") or {}).get("build_s"), (t.get("after") or {}).get("build_s")
+        s = (t.get("after") or {}).get("solver_s")
+        if b and a_:
+            tb, ta, ts = tb + b, ta + a_, ts + (s or 0.0)
+        ch = f"{100.0 * (a_ - b) / b:+.0f} %" if b and a_ else "-"
+        rows.append(f"| {r['name']} | {b if b is not None else '-'} | {a_ if a_ is not None else '-'} | {ch} | "
+                    f"{s if s is not None else '-'} |")
+    if tb:
+        rows.append(f"| **total** | {tb:.0f} | {ta:.0f} | {100.0 * (ta - tb) / tb:+.0f} % | {ts:.0f} |")
+    rows += ["", "Earth's own build of the place (the block and its road tiles); the solver passes' time is what the "
+                 "interchange shapes and the road laws logged, summed over their cells. A side reused from an earlier run "
+                 "has the timing of that run (none before this table existed)."]
+    return rows
 
 
 def write_report(results, a):
@@ -333,7 +387,7 @@ def write_report(results, a):
             [f"- **{n}** (`{n}.png`): " + ", ".join(f"{name} {v}" for name, v in what) for n, what in flagged] +
             [""] if flagged else ["No junction has yellow or red after the change.", ""])
     md = [f"# Earth before / after: {len(results)} junctions", "", f"- before: `{a.before}`", f"- after: `{a.after}`", "",
-          *look, *rows, "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
+          *look, *rows, "", *timing_rows(results), "", "Each junction's picture is `<name>.png` (before over after), its close-up's change `<name>_diff.png`.", ""]
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     with open(os.path.join(a.out, "report.json"), "w", encoding="utf-8") as f:

@@ -64,6 +64,7 @@ import math
 import os
 import re
 import sys
+import time
 
 import numpy as np
 
@@ -1348,13 +1349,17 @@ def build_earth(a, frame, px, py, log, reach=None):
     tiles = tiles_covering(px, py, a.radius)
     built = tiles_covering(px, py, max(a.radius, reach or 0.0))
     stem = f"hm_{a.aid}_{int(cx)}_{int(cy)}"
+    timing_path = os.path.join(data_dir, "timing.json")
+    timing = {}
     if not (a.reuse and os.path.isfile(os.path.join(data_dir, stem + ".info.json"))):
         blockworker = earth_state(a, log)
         lat0, lon0 = a.anchor
         log(f"building block ({cx:g}, {cy:g}), {a.block_size} samples: this takes minutes ...")
+        t0 = time.perf_counter()
         info = blockworker.build(a.aid, lat0, lon0, HM_ZOOM, a.q, cx, cy, a.block_size, data_dir, stem + ".png",
                                  ter_name=stem + "_view.ter")
         info = {k: v for k, v in dict(info).items() if isinstance(v, (int, float, str, bool, type(None)))}
+        timing["block_s"] = round(time.perf_counter() - t0, 2)
         info.setdefault("q", a.q)
         info["size"] = a.block_size
         with open(os.path.join(data_dir, stem + ".info.json"), "w", encoding="utf-8") as f:
@@ -1366,9 +1371,15 @@ def build_earth(a, frame, px, py, log, reach=None):
             continue
         blockworker = earth_state(a, log)
         log(f"building road tile ({tx}, {ty}) ...")
+        t0 = time.perf_counter()
         blockworker.roads_tile(a.aid, a.anchor[0], a.anchor[1], HM_ZOOM, tx, ty, data_dir, "/vfs", True, 0.0,
                                buildings=not a.no_buildings, left_hand=drives_left(a.anchor[0], a.anchor[1], log), mph=False,
                                q=a.q, gas_stations=True)
+        timing["tiles_s"] = round(timing.get("tiles_s", 0.0) + time.perf_counter() - t0, 2)
+        timing["tiles"] = timing.get("tiles", 0) + 1
+    if timing:              # (Earth's own time to build the place: what a player waits for, the eval's timing table)
+        with open(timing_path, "w", encoding="utf-8") as f:
+            json.dump(timing, f)
     z, holes, info = load_block_files(data_dir, a.aid, cx, cy)
     n = z.shape[0]
     return z, holes, info, cx - n / 2.0, cy - n / 2.0, (cx, cy), tiles, data_dir
