@@ -1568,14 +1568,15 @@ def main():
         vt, vc = reference_vehicles(tris, surface[1], limits, map_l, ground=lambda x, y: bilinear(z, x0, y0, x, y))
         nv = int(np.isin(vc, (TRUCK, WAGON)).sum()) // 12
         nv_t = int((vc == TRUCK).sum()) // 12
-        hits = earth_checks.vehicle_hits(vt[:nv * 12], tris[np.isin(surface[1], HIT_BY)])
-        kinds = ["truck" if vc[12 * k] == TRUCK else "wagon" for k in range(nv)]    # (before the hits are marked HIT)
+        hb = np.isin(surface[1], HIT_BY)
+        hits = earth_checks.vehicle_hits(vt[:nv * 12], tris[hb])
+        names = ["truck" if vc[12 * k] == TRUCK else "wagon" for k in range(nv)]    # (before the hits are marked HIT; not kinds:
+        # the overview reads its tiles' meshes of those)
         vc = vc.copy()
         vc[:nv * 12][np.repeat(hits, 12)] = HIT
         checks.update(vehicles=nv, vehicles_hit=int(hits.sum()))
         if hits.any():                  # (each one: where, what it cuts, how deep: the cases to analyse)
-            hb = np.isin(surface[1], HIT_BY)
-            checks["hits"] = earth_checks.hit_report(vt[:nv * 12], kinds, tris[hb], surface[1][hb], hits,
+            checks["hits"] = earth_checks.hit_report(vt[:nv * 12], names, tris[hb], surface[1][hb], hits,
                                                      {k: CLASS_NAME[k].split(" (")[0].split(",")[0] for k in HIT_BY})
             for h in checks["hits"]:
                 log(f"    {h['kind']} at x {h['x']} y {h['y']} z {h['z']} heading {h['heading']:g}: hits "
