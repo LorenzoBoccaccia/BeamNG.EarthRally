@@ -25,7 +25,9 @@ per tree, Earth's plan cache off), then:
 
 A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
 moved more than MINOR_M (a rebuild's noise), else "changed". --fail-on-change exits 1 when one did, or got worse, that
-is not in --expect (the junctions the change is about). --before-from <a former run's out> takes the before sides from
+is not in --expect (the junctions the change is about). --fail-fast stops at the first red junction (an error, a vehicle
+hitting, meshes cutting) and an after side's build at its first infeasible system, Python error or failed allocation, one
+junction at a time; with --history <json> the junctions red last time run first, the quickest first. --before-from <a former run's out> takes the before sides from
 that run as they are (an upstream capture made once: python tools/earth_eval.py --before <upstream tree> --after <tree>
 --out <capture> --labels upstream,latest; then each run --before-from <capture>, only the after tree built), and
 tools/eval_page.py makes one page of a run. --reuse draws from the data a former run left (no build), --online
@@ -57,6 +59,13 @@ GROUPS = {"ground": (ev.GROUND, ev.MOVED), "road": (ev.ROAD,), "deck": (ev.DECK,
 UP_RGB, DOWN_RGB, KIND_RGB, SAME_RGB = (0.85, 0.1, 0.1), (0.1, 0.25, 0.9), (0.45, 0.45, 0.45), (1.0, 1.0, 1.0)
 LIDAR_WAIT_S = "900"            # s each side may wait for a place's lidar (build_side)
 DIFF_FULL_M = 2.0               # m of rise or fall drawn at the full colour
+# (--fail-fast: an after side's build line that already makes the junction red, the build stopped there: an interchange
+# system or road network the solver could not satisfy, a Python error, a native allocation that failed. Shanghai's eval
+# logged its first infeasible system in its first hour and solved on for two more; the A5's build died of memory after
+# its first two regions)
+FAIL_LINES = re.compile(r"infeasible system|infeasible network|Traceback \(most recent call last\)|"
+                        r"memory allocation of \d+ bytes failed")
+WATCH_S = 2.0                   # s between two reads of a watched build's log
 
 
 def load_set(path):
@@ -113,10 +122,56 @@ def build_side(j, side, tree, a, log):
     # cached: Boston's Bowker "fell" 4-6 m between two identical trees. The wait pre-cache uses, so neither side gives up)
     env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off", BNE_LIDAR_GAPS_WAIT=LIDAR_WAIT_S)
     t = time.time()
-    with open(os.path.join(out, "view.log"), "w", encoding="utf-8") as f:
-        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
-    log(f"  {side}: {time.time() - t:.0f} s{'' if r.returncode == 0 else f', failed ({r.returncode}): see {out}/view.log'}")
-    return None if r.returncode == 0 else f"earth_view exited {r.returncode} (see {side}/view.log)"
+    watch = FAIL_LINES if side == "after" and getattr(a, "fail_fast", False) else None
+    rc, line = run_watched(cmd, os.path.join(out, "view.log"), env, REPO, watch)
+    if line is not None:
+        log(f"  {side}: stopped after {time.time() - t:.0f} s at: {line[:200]}")
+        return f"failed early: {line[:300]}"
+    log(f"  {side}: {time.time() - t:.0f} s{'' if rc == 0 else f', failed ({rc}): see {out}/view.log'}")
+    return None if rc == 0 else f"earth_view exited {rc} (see {side}/view.log)"
+
+
+def kill_tree(p):
+    """Stop process p and every process it started (earth_view starts Earth's server, which starts its workers)."""
+    if p.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        import signal
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            p.kill()
+    p.wait()
+
+
+def run_watched(cmd, log_path, env, cwd, watch=None):
+    """(returncode, the first log line watch matched or None): cmd run with its output in log_path; with watch (a regex),
+    its log read every WATCH_S as it is written and the process tree stopped at the first line watch matches."""
+    with open(log_path, "w", encoding="utf-8") as f:
+        p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd,
+                             start_new_session=sys.platform != "win32")
+        if watch is None:
+            return p.wait(), None
+        pos, rest = 0, ""
+        while True:
+            done = p.poll() is not None
+            with open(log_path, encoding="utf-8", errors="replace") as r:
+                r.seek(pos)
+                chunk = r.read()
+                pos = r.tell()
+            lines = (rest + chunk).split("\n")
+            rest = lines.pop()          # (a line still being written: read whole next time)
+            if done:
+                lines.append(rest)
+            for ln in lines:
+                if watch.search(ln):
+                    kill_tree(p)
+                    return p.returncode, ln.strip()
+            if done:
+                return p.returncode, None
+            time.sleep(WATCH_S)
 
 
 def compare(before, after, same_m=SAME_M):
@@ -329,6 +384,33 @@ def run_junction(j, a, log):
     return {k: v for k, v in res.items() if not k.startswith("_")}
 
 
+def red(res):
+    """Why junction result res is red (an error, a build stopped early, a vehicle hitting, meshes cutting in the close-up or
+    the 1 km overview, after the change), or None when it is not."""
+    if res.get("error"):
+        return res["error"]
+    what = [f"{(res.get('checks', {}).get(k) or [None, None])[1]} {name}" for k, name in CHECKS
+            if (res.get("checks", {}).get(k) or [None, None])[1]]
+    return "; ".join(what) or None
+
+
+def load_history(path):
+    """{name: {"red": bool, "s": the last run's seconds}} of former runs (--history), {} without one."""
+    if not path or not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def fail_first(junctions, history):
+    """junctions in the order that fails soonest: those red last time first, then those never run, then the rest; the
+    quickest first within each (a heavy junction never queued in front of a quick one known to fail)."""
+    def key(j):
+        h = history.get(j["name"])
+        return (1, 0.0) if h is None else (0 if h.get("red") else 2, float(h.get("s") or 0.0))
+    return sorted(junctions, key=key)
+
+
 def flagged_junctions(results):
     """[(name, [(what, count)])] of the junctions whose after side has a vehicle hitting (yellow) or meshes cutting (red), most
     first: the pictures to look at; the others need no look unless they changed."""
@@ -420,6 +502,11 @@ def main(argv=None):
     ap.add_argument("--online", action="store_true", help="fetch the map data the cache lacks")
     ap.add_argument("--no-buildings", action="store_true")
     ap.add_argument("--cache", help="Earth's map data cache (earth_view's default otherwise)")
+    ap.add_argument("--fail-fast", action="store_true", help="stop at the first red junction (exit 1), one junction at a "
+                    "time, and stop an after side's build at its first infeasible system / network, Python error or "
+                    "failed allocation (FAIL_LINES); with --history, the junctions red last time first")
+    ap.add_argument("--history", help="a json of each junction's last result (red, seconds), read for --fail-fast's "
+                    "order and written after each junction")
     ap.add_argument("--fail-on-change", action="store_true", help="exit 1 if a junction not in --expect changed")
     ap.add_argument("--expect", default="", help="comma list of the junctions the change is about")
     a = ap.parse_args(ev.joined_pairs(sys.argv[1:] if argv is None else argv, ("--at",)))
@@ -449,12 +536,31 @@ def main(argv=None):
             if unknown:
                 sys.exit(f"not in {a.set}: {', '.join(sorted(unknown))}")
             junctions = [j for j in junctions if j["name"] in want]
-    if a.jobs > 1:                  # (each side is its own earth_view process: junctions side by side)
+    history = load_history(a.history)
+    if a.fail_fast:
+        junctions = fail_first(junctions, history)
+    if a.jobs > 1 and not a.fail_fast:     # (each side is its own earth_view process: junctions side by side)
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(a.jobs) as ex:
             results = list(ex.map(lambda j: run_junction(j, a, lambda m, n=j["name"]: log(f"[{n}] {m.strip()}")), junctions))
     else:
-        results = [run_junction(j, a, log) for j in junctions]
+        results = []
+        for i, j in enumerate(junctions):
+            t = time.time()
+            results.append(run_junction(j, a, log))
+            why = red(results[-1]) if a.sides != ["before"] else results[-1].get("error")
+            if a.history:
+                history[j["name"]] = {"red": bool(why), "s": round(time.time() - t, 1)}
+                with open(a.history, "w", encoding="utf-8") as f:
+                    json.dump(history, f, indent=1, sort_keys=True)
+            if a.fail_fast and why:
+                left = [x["name"] for x in junctions[i + 1:]]
+                log(f"fail-fast: {j['name']} is red ({why}); stopped" + (f", not run: {', '.join(left)}" if left else ""))
+                break
+    if a.fail_fast and results and (red(results[-1]) if a.sides != ["before"] else results[-1].get("error")):
+        if a.sides != ["before"]:
+            log(write_report(results, a))
+        return 1
     if a.sides == ["before"]:
         bad = [r["name"] for r in results if r.get("error")]
         log(f"captured {len(results) - len(bad)} of {len(results)} before sides" + (f"; failed: {', '.join(bad)}" if bad else ""))
