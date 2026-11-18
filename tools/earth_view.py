@@ -106,6 +106,7 @@ CLASS_RGB = np.array([
     (1.00, 0.00, 0.00),     # meshes cutting each other at a crossing of different levels: red
 ])
 CHECK_CLASSES = {"ground": (0, 1), "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
+CHECKS = dict(CHECK_CLASSES)    # (the classes the checks run with: main adds what the loaded Earth tree draws, rail_tunnels)
 # What a vehicle's body may not cut: every Earth mesh, the terrain too (a cut's slope or a mound beside a road or a track,
 # a ridge at a junction, the ground of a bridge Earth did not build): GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL. Its
 # own road or track under it never counts (earth_checks.BODY_BASE_M); kerbs, sidewalks and barriers along it do not either.
@@ -1344,7 +1345,7 @@ def overview_cuts(z, x0, y0, holes, tris, cls, lines):
         g, gcl = terrain_mesh(z, x0, y0, b, holes)
         m = M[(hi[:, 0] >= b[0]) & (lo[:, 0] <= b[2]) & (hi[:, 1] >= b[1]) & (lo[:, 1] <= b[3])]
         hit, got = earth_checks.penetrations(np.concatenate([g, tris[m]]), np.concatenate([gcl, cls[m]]), lines,
-                                             CHECK_CLASSES, xings=[xing])
+                                             CHECKS, xings=[xing])
         out += got
         cut[m[hit[len(g):]]] = True
         if hit[:len(g)].any():
@@ -1670,6 +1671,8 @@ def main():
     os.environ["BNGE_BLOCKCACHE"] = "off"       # (a block from Earth's disk cache of graded blocks would skip the build)
     import earth_trace
     earth_trace.load_earth(a.earth)
+    import railways
+    CHECKS["rail_tunnels"] = bool(railways.TUNNELS_ON)     # (a railway's tunnel tube is drawn only with it)
     import geodesy
     lat0, lon0 = a.anchor
     frame = geodesy.EnuFrame(lat0, lon0)
@@ -1707,7 +1710,7 @@ def main():
     map_l, limits = map_lines(a, frame, box, log)
     if map_l is not None:
         log(f"  map lines: {len(map_l['road'])} roads, {len(map_l['rail'])} railways")
-        cut, xings = earth_checks.penetrations(tris, cls, map_l, CHECK_CLASSES)
+        cut, xings = earth_checks.penetrations(tris, cls, map_l, CHECKS)
         in_box = [c for c in xings if box[0] <= c[0] <= box[2] and box[1] <= c[1] <= box[3]]
         checks.update(crossings=len(in_box), crossings_cut=earth_checks.count_cut(xings, box))
         log(f"  crossings of the map's lines at different levels: {checks['crossings']}, "

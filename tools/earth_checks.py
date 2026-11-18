@@ -311,6 +311,11 @@ def _surface(side, tris, cls, C, near, classes):
             return near[cls[near] == T]
         kind = "ground"
     if kind == "tunnel":
+        if rail and not classes.get("rail_tunnels", True):
+            # (the Earth tree under test draws no tube for a railway in a tunnel, railways.TUNNELS_ON off: the tunnel-class
+            # triangles round the crossing are the road tunnels' and the cuttings' walls, not this railway's; counted as
+            # its surface, Vienna's tram and subway tunnels under a busway and a trench "cut" 8 and 12 times there)
+            return near[:0]
         return near[cls[near] == T]
     if rail:
         return near[cls[near] == R]
@@ -321,7 +326,8 @@ def _surface(side, tris, cls, C, near, classes):
 def penetrations(tris, cls, lines, classes, near_m=CROSS_NEAR_M, xings=None):
     """(hit (len tris,) bool, crossings [(x, y, cut)]): at every crossing of the map's lines at different levels, the triangles
     of the upper line's surface and of the lower's cutting through each other (cutting). classes: {"ground": (ids,), "deck":
-    id, "rail": id, "tunnel": id} (the viewer's classes). A line's surface: a road bridge its deck, a railway its track (and its
+    id, "rail": id, "tunnel": id, "rail_tunnels": whether the tree draws a railway's tunnel tube (default True)} (the viewer's
+    classes). A line's surface: a road bridge its deck, a railway its track (and its
     deck on a bridge), a long tunnel its tube, a ground road its ground GROUND_CORRIDOR_M round its line. xings: those crossings
     only (level_crossings' items), else all of lines'."""
     hit = np.zeros(len(tris), bool)

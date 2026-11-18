@@ -166,9 +166,7 @@ def test_both_eval_sides_wait_for_the_lidar(tmp_path, monkeypatch):
     import earth_eval as ee
     seen = []
 
-    class R:
-        returncode = 0
-    monkeypatch.setattr(ee.subprocess, "run", lambda cmd, stdout=None, stderr=None, env=None, cwd=None: seen.append(env) or R())
+    monkeypatch.setattr(ee, "run_watched", lambda cmd, log_path, env, cwd, watch=None: seen.append(env) or (0, None))
 
     class A:
         out, image, views, reuse, online, no_buildings, cache = str(tmp_path), "10x10", "top", False, False, False, None
@@ -291,3 +289,17 @@ def test_a_hit_is_named_by_where_it_is_what_it_stands_on_and_what_it_strikes():
     assert "truck at 45.0000" in line and "on road own-id (primary, ground)" in line
     assert "bridge deck at x 0.0 y 5.0 z 0.6..1.0" in line and "of road deck-id (motorway, bridge)" in line
     assert "ground at x 1.0 y 0.5" in line and "graded by nearest road own-id" in line
+
+
+def test_a_rail_tunnel_the_tree_does_not_draw_has_no_surface_to_cut():
+    # (Vienna: a tram tunnel under a busway "cut" by the road tunnels' and the cuttings' walls round it, Earth drawing no tube)
+    g, gc = flat_ground()
+    wall = slab(0, 0, -3.0, 1.0, Y, 6, 1)            # a tunnel-class wall standing through the road's ground
+    tris = np.concatenate([g, wall])
+    cls = np.concatenate([gc, np.full(12, ev.TUNNEL, np.int8)])
+    lines = {"road": [(np.array([[-40.0, 0.0], [40.0, 0.0]]), [])],
+             "rail": [(np.array([[0.0, -40.0], [0.0, 40.0]]), [(0.0, 1.0, "tunnel")])]}
+    _hit, drawn = ck.penetrations(tris, cls, lines, dict(CLASSES, rail_tunnels=True))
+    _hit, undrawn = ck.penetrations(tris, cls, lines, dict(CLASSES, rail_tunnels=False))
+    assert ck.count_cut(drawn) == 1, "a drawn tube through the road's ground still cuts"
+    assert ck.count_cut(undrawn) == 0
