@@ -27,6 +27,7 @@
      "anchor": [42.17, 13.83], "aid": 2, "q": 0.015625, "at": [42.1777, 13.8268], "radius": 60},
     {"name": "vienna_a23", "what": "Vienna: the A23 over Erzherzog-Karl-Strasse, its tube (a drive-before-merging site)", "at": [48.22963, 16.45307], "radius": 60},
     {"name": "casagranda_bridge", "what": "Galleria Casagranda: a bridge between two tunnels, a large incline (Earth drivability site)", "at": [45.86134, 10.83268], "radius": 60},
-    {"name": "casagranda_portal", "what": "Galleria Casagranda: a tunnel's portal (Earth drivability site)", "at": [45.85964, 10.83267], "radius": 60}
+    {"name": "casagranda_portal", "what": "Galleria Casagranda: a tunnel's portal (Earth drivability site)", "at": [45.85964, 10.83267], "radius": 60},
+    {"name": "shanghai_nanpu_spiral", "what": "Shanghai: the Nanpu Bridge's Puxi approach, a spiral that passes over itself (OSM layers 1-3) into the Inner Ring elevated (the user: 'not even the craziest one nampu bridge')", "at": [31.2098, 121.4965], "radius": 150}
   ]
 }
