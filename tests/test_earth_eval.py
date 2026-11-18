@@ -181,3 +181,57 @@ def test_the_build_time_table_has_the_change_and_the_total():
     assert "| j | 100.0 | 130.0 | +30 % | 20.0 |" in rows
     assert "| k | - | 50.0 | - | - |" in rows
     assert "| **total** | 100 | 130 | +30 % | 20 |" in rows
+
+
+def test_a_watched_build_is_stopped_at_its_first_failing_line(tmp_path):
+    # (--fail-fast: Shanghai solved on two hours past its first infeasible system)
+    script = ("import sys, time\nprint('building', flush=True)\n"
+              "print('ERROR earthd.grading: grading: SHAPES infeasible system in region 14/1/2', flush=True)\n"
+              "time.sleep(120)\n")
+    t = __import__("time").time()
+    rc, line = ee.run_watched([sys.executable, "-c", script], str(tmp_path / "view.log"), dict(os.environ), str(tmp_path),
+                              ee.FAIL_LINES)
+    assert "infeasible system" in line
+    assert __import__("time").time() - t < 60, "stopped, not waited for"
+    assert "building" in (tmp_path / "view.log").read_text(encoding="utf-8")
+
+
+def test_an_unwatched_or_clean_build_runs_to_its_end(tmp_path):
+    script = "print('WARNING region 1: 5 systems (0 infeasible, left as they are)')\n"
+    for watch in (None, ee.FAIL_LINES):
+        rc, line = ee.run_watched([sys.executable, "-c", script], str(tmp_path / "view.log"), dict(os.environ),
+                                  str(tmp_path), watch)
+        assert rc == 0 and line is None
+
+
+def test_red_is_an_error_or_a_hit_or_a_cut_after_the_change():
+    assert ee.red({"error": "failed early: x"}) == "failed early: x"
+    assert ee.red({"checks": {"vehicles_hit": [3, 0], "crossings_cut": [0, 0], "overview_crossings_cut": [None, None]}}) is None
+    assert "2 " in ee.red({"checks": {"vehicles_hit": [0, 0], "crossings_cut": [0, 2]}})
+
+
+def test_the_junctions_red_last_time_run_first_the_quickest_first():
+    js = [{"name": n} for n in ("green", "new", "heavy_red", "quick_red")]
+    hist = {"green": {"red": False, "s": 10}, "heavy_red": {"red": True, "s": 10000}, "quick_red": {"red": True, "s": 300}}
+    assert [j["name"] for j in ee.fail_first(js, hist)] == ["quick_red", "heavy_red", "new", "green"]
+
+
+def test_fail_fast_stops_at_the_first_red_junction_and_writes_the_history(tmp_path, monkeypatch):
+    ran = []
+
+    def fake(j, a, log):
+        ran.append(j["name"])
+        return {"name": j["name"], "checks": {"vehicles_hit": [0, 1 if j["name"] == "b" else 0]}}
+    monkeypatch.setattr(ee, "run_junction", fake)
+    monkeypatch.setattr(ee, "load_set", lambda p: [{"name": n} for n in ("a", "b", "c")])
+    monkeypatch.setattr(ee, "write_report", lambda results, a: "report")
+    hist = tmp_path / "h.json"
+    rc = ee.main(["--before", str(tmp_path), "--after", str(tmp_path), "--out", str(tmp_path / "o"), "--fail-fast",
+                  "--history", str(hist)])
+    assert rc == 1 and ran == ["a", "b"]
+    h = json.loads(hist.read_text())
+    assert h["b"]["red"] and not h["a"]["red"] and "c" not in h
+    ran.clear()
+    ee.main(["--before", str(tmp_path), "--after", str(tmp_path), "--out", str(tmp_path / "o"), "--fail-fast",
+             "--history", str(hist)])
+    assert ran == ["b"], "the red one first next time, and stopped there"
