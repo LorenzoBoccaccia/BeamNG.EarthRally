@@ -100,12 +100,11 @@ def test_an_overpass_is_driven_on_both_levels(lua):
     assert zs == {0, 7}
 
 
-def test_the_tour_drives_each_junction_and_ends(lua):
-    lua.execute("""
-      road('w', line(-300, 0, 0, 0, 20, 'J'))
-      road('e', line(0, 0, 300, 0, 20, 'J'))
+FAKE = """
       calls = {}
-      local car = { pos = { x = 0, y = 0, z = 0 }, speed = 10 }
+      car = { pos = { x = 0, y = 0, z = 0 }, speed = 10 }
+      layers = { 0 }        -- (the surfaces the game has, every x, y: heights; none: nothing built there yet)
+      moves = true          -- (the AI gets to the drive's end)
       local anchor = {
         geodeticToWorld = function(self, lat, lon, h) return 0, 0, 0 end,
         worldToGeodetic = function(self, x, y, z) return 42 + y / 111320, 13 + x / 82000, 0 end,
@@ -117,26 +116,54 @@ def test_the_tour_drives_each_junction_and_ends(lua):
         roadsReady = function() return true end,
         nodes = function() return nodes end,
         car = function() return car end,
-        place = function(p, d) calls[#calls + 1] = string.format('place %.0f', p.x); car.pos = { x = p.x, y = p.y, z = p.z } end,
+        surface = function(x, y, top, reach)
+          local best
+          for _, h in ipairs(layers) do
+            if h <= top and h >= top - reach and (not best or h > best) then best = h end
+          end
+          return best
+        end,
+        place = function(p, d)
+          calls[#calls + 1] = string.format('place %.0f %.1f', p.x, p.z)
+          car.pos = { x = p.x, y = p.y, z = p.z }
+        end,
         drive = function(names, dest, label)
           calls[#calls + 1] = 'gps ' .. label
           calls[#calls + 1] = 'drive ' .. #names
-          local e = nodes[names[#names]].pos
-          car.pos = { x = e.x, y = e.y, z = e.z }         -- (it gets there)
+          if moves then
+            local e = nodes[names[#names]].pos
+            car.pos = { x = e.x, y = e.y, z = e.z }         -- (it gets there)
+          end
         end,
         stopAi = function() calls[#calls + 1] = 'stop' end,
         gpsClear = function() calls[#calls + 1] = 'gps clear' end,
         say = function() end,
-        log = function() end,
+        log = function(level, msg) calls[#calls + 1] = 'log ' .. msg end,
       }
-      tour.start(ctx, { { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } })
-      for i = 1, 400 do
-        if not tour.running() then break end
-        if i == 2 or i == 40 then tour.onAnchor() end
-        tour.update(0.25)
+      function run(list, steps, each)
+        tour.start(ctx, list)
+        for i = 1, steps do
+          if not tour.running() then break end
+          if i == 2 or i == 40 then tour.onAnchor() end
+          if each then each(i) end
+          tour.update(0.25)
+        end
       end
+"""
+
+
+def straight(lua):
+    lua.execute("""
+      road('w', line(-300, 0, 0, 0, 20, 'J'))
+      road('e', line(0, 0, 300, 0, 20, 'J'))
     """)
-    calls = names(lua.eval("calls"))
+    lua.execute(FAKE)
+
+
+def test_the_tour_drives_each_junction_and_ends(lua):
+    straight(lua)
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } }, 400)")
+    calls = [c for c in names(lua.eval("calls")) if not c.startswith("log")]
     assert lua.eval("tour.running()") is False
     assert calls[0] == "teleport Junction: one"
     assert [c for c in calls if c.startswith("teleport")] == ["teleport Junction: one", "teleport Junction: two"]
@@ -144,6 +171,49 @@ def test_the_tour_drives_each_junction_and_ends(lua):
     first_drive = next(i for i, c in enumerate(calls) if c.startswith("drive"))
     assert calls.index("gps Junction: one") < first_drive, "the GPS set before the AI drives"
     assert calls[-2:] == ["stop", "gps clear"]
+
+
+def test_the_car_is_put_on_the_road_as_the_game_has_it(lua):
+    # the road graded 2 m over the navgraph's height, a deck over it 9 m up: the car on the road, not in it, not on the deck
+    straight(lua)
+    lua.execute("layers = { -6, 2, 9 }")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400)")
+    places = [c for c in names(lua.eval("calls")) if c.startswith("place")]
+    assert len(places) == 1 and places[0].endswith(" %.1f" % (2 + lua.eval("tour.PLACE_UP_M")))
+
+
+def test_the_car_waits_for_the_road_to_be_there(lua):
+    # a viaduct not built yet: no surface near the node (the ground 52 m under it): no drop, the car waits for the deck
+    straight(lua)
+    lua.execute("layers = { -52 }")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400, function(i) if i == 120 then layers = { -52, 0 } end end)")
+    calls = names(lua.eval("calls"))
+    places = [c for c in calls if c.startswith("place")]
+    assert places == ["place %s %.1f" % (places[0].split()[1], lua.eval("tour.PLACE_UP_M"))]
+    assert sum(c.startswith("drive") for c in calls) == 1
+
+
+def test_a_drive_with_no_road_at_its_start_is_left_out(lua):
+    straight(lua)
+    lua.execute("layers = { -52 }")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } }, 2000)")
+    calls = names(lua.eval("calls"))
+    assert lua.eval("tour.running()") is False
+    assert not [c for c in calls if c.startswith(("place", "drive"))]
+    assert sum("drive 1: no road surface at its start" in c for c in calls) == 2, "each junction tried, then the next"
+
+
+def test_the_navgraph_made_again_during_a_drive(lua):
+    # the roads reload while the car drives: the navgraph's nodes are new ones, the drive's own end goes on (it read its
+    # end from the old nodes: "attempt to index a nil value", and the tour stopped at the second junction)
+    straight(lua)
+    lua.execute("moves = false")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } }, 2000, "
+                "function(i) if i == 60 then nodes = {} end end)")
+    calls = names(lua.eval("calls"))
+    assert lua.eval("tour.running()") is False
+    assert [c for c in calls if c.startswith("teleport")] == ["teleport Junction: one", "teleport Junction: two"]
+    assert "log junction tour stopped: all junctions driven" in calls
 
 
 def test_the_junctions_file_reads_both_kinds_of_entry(lua):
