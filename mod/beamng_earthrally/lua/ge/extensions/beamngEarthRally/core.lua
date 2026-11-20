@@ -2289,7 +2289,13 @@ local function tourCtx()
       if not (es and es.anchorId and roads and roads.readyAround) then return true end
       return roads.readyAround(es.anchorId, x, y, r) and true or false
     end,
-    nodes = function()
+    nodes = function(x, y, r)
+      local ng, es = earthModule('navgraph'), earthState()
+      if not (ng and ng.appliedCovers) then
+        tell('EarthRally: this BeamNG.Earth cannot say whose road graph the map holds: the junction tour needs a newer one')
+        return nil
+      end
+      if not (es and es.anchorId and ng.appliedCovers(es.anchorId, x, y, r)) then return nil end
       local ok, m = pcall(function() return map and map.getMap and map.getMap() end)
       return ok and m and m.nodes or nil
     end,
@@ -2304,12 +2310,19 @@ local function tourCtx()
       end
       return { pos = { x = p.x, y = p.y, z = p.z }, speed = speed }
     end,
-    -- the first static surface (the road as built, a deck, the terrain) a ray down from top finds within reach
-    surface = function(x, y, top, reach)
-      if not (castRayStatic and vec3) then return nil end
-      local hit = castRayStatic(vec3(x, y, top), vec3(0, 0, -1), reach)
-      if hit and hit < reach then return top - hit end
-      return nil
+    -- every static surface (the roads as built, decks, the terrain) a ray down from top meets before bottom
+    surfaces = function(x, y, top, bottom)
+      local out = {}
+      if not (castRayStatic and vec3) then return out end
+      local z = top
+      while z > bottom and #out < 16 do
+        local reach = z - bottom
+        local hit = castRayStatic(vec3(x, y, z), vec3(0, 0, -1), reach)
+        if not (hit and hit < reach) then break end
+        out[#out + 1] = z - hit
+        z = z - hit - 0.05              -- (on through it: a deck's underside, the road under it)
+      end
+      return out
     end,
     place = function(pos, dir)
       local v = veh()
@@ -2321,6 +2334,7 @@ local function tourCtx()
         v:setPositionRotation(pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w)
       end
       v:queueLuaCommand('recovery.clear()')
+      v:queueLuaCommand('obj:requestReset(RESET_PHYSICS)')     -- (repaired where it stands: a drive's crash not carried on)
     end,
     -- Earth's GPS to the drive's end and Earth's autodrive on (its route on the map, the arrows, the car's AI in its lane
     -- at the legal speed, unstuck when it stalls): no driving of ours

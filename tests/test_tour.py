@@ -106,6 +106,7 @@ FAKE = """
       layers = { 0 }        -- (the surfaces the game has, every x, y: heights; none: nothing built there yet)
       moves = true          -- (the AI gets to the drive's end)
       roadsIn = true        -- (Earth's roads round the junction are in)
+      graphIn = true        -- (the map's road graph is the current anchor's, round the junction)
       local anchor = {
         geodeticToWorld = function(self, lat, lon, h) return 0, 0, 0 end,
         worldToGeodetic = function(self, x, y, z) return 42 + y / 111320, 13 + x / 82000, 0 end,
@@ -115,14 +116,13 @@ FAKE = """
         ready = function() return true end,
         teleport = function(lat, lon, name) calls[#calls + 1] = 'teleport ' .. name; return true end,
         roadsReady = function() return roadsIn end,
-        nodes = function() return nodes end,
+        nodes = function(x, y, r) if graphIn then return nodes end end,
         car = function() return car end,
-        surface = function(x, y, top, reach)
-          local best
-          for _, h in ipairs(layers) do
-            if h <= top and h >= top - reach and (not best or h > best) then best = h end
-          end
-          return best
+        surfaces = function(x, y, top, bottom)
+          local out = {}
+          for _, h in ipairs(layers) do if h <= top and h >= bottom then out[#out + 1] = h end end
+          table.sort(out, function(p, q) return p > q end)
+          return out
         end,
         place = function(p, d)
           calls[#calls + 1] = string.format('place %.0f %.1f', p.x, p.z)
@@ -183,20 +183,40 @@ def test_the_car_is_put_on_the_road_as_the_game_has_it(lua):
     assert len(places) == 1 and places[0].endswith(" %.1f" % (2 + lua.eval("tour.PLACE_UP_M")))
 
 
-def test_the_car_waits_for_the_road_to_be_there(lua):
-    # a viaduct not built yet: no surface near the node (the ground 52 m under it): no drop, the car waits for the deck
+def test_the_car_goes_on_the_road_nearest_its_start(lua):
+    # the road as built 12 m over the navgraph's node, the ground 40 m under: the road, wherever it is
     straight(lua)
-    lua.execute("layers = { -52 }")
-    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400, function(i) if i == 120 then layers = { -52, 0 } end end)")
+    lua.execute("layers = { -40, 12 }")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400)")
+    places = [c for c in names(lua.eval("calls")) if c.startswith("place")]
+    assert len(places) == 1 and places[0].endswith(" %.1f" % (12 + lua.eval("tour.PLACE_UP_M")))
+
+
+def test_the_car_waits_for_the_road_to_be_there(lua):
+    # nothing built there yet: no drop, the car waits for it
+    straight(lua)
+    lua.execute("layers = {}")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400, function(i) if i == 120 then layers = { 0 } end end)")
     calls = names(lua.eval("calls"))
     places = [c for c in calls if c.startswith("place")]
     assert places == ["place %s %.1f" % (places[0].split()[1], lua.eval("tour.PLACE_UP_M"))]
     assert sum(c.startswith("drive") for c in calls) == 1
 
 
+def test_the_old_anchors_graph_is_not_driven(lua):
+    # after a teleport the map holds the old anchor's graph until the new one is applied: no drive picked from it
+    straight(lua)
+    lua.execute("graphIn = false")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 400, function(i) if i == 160 then graphIn = true; calls[#calls + 1] = 'graph in' end end)")
+    calls = names(lua.eval("calls"))
+    first_place = next(i for i, c in enumerate(calls) if c.startswith("place"))
+    assert sum(c.startswith("drive") for c in calls) == 1
+    assert calls.index("graph in") < first_place, "the drive picked once the graph is the current anchor's"
+
+
 def test_a_drive_with_no_road_at_its_start_is_left_out(lua):
     straight(lua)
-    lua.execute("layers = { -52 }")
+    lua.execute("layers = {}")
     lua.execute("run({ { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } }, 2000)")
     calls = names(lua.eval("calls"))
     assert lua.eval("tour.running()") is False

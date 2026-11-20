@@ -14,11 +14,12 @@
 --   ctx.ready()                   Earth can take a teleport now
 --   ctx.teleport(lat, lon, name)  Earth's teleport; true when taken
 --   ctx.roadsReady(x, y, r)       the roads within r of x, y are in (true when there is nothing to wait for)
---   ctx.nodes()                   the navgraph's nodes (map.getMap().nodes) or nil
+--   ctx.nodes(x, y, r)            the navgraph's nodes (map.getMap().nodes) once it is the current anchor's and covers r
+--                                 round x, y (a teleport leaves the old anchor's graph in the map, in the old frame), or nil
 --   ctx.car()                     { pos = {x, y, z}, speed = m/s } of the player's car or nil
---   ctx.surface(x, y, top, reach) the height of the first surface the game has (the graded road, a deck, the ground) a
---                                 ray down from top finds within reach, or nil (nothing there yet)
---   ctx.place(pos, dir)           put the car at pos ({x, y, z}) facing dir ({x, y})
+--   ctx.surfaces(x, y, top, bottom) the heights of the surfaces the game has (the roads as built, decks, the ground)
+--                                 along a ray down from top to bottom, highest first (none: nothing there yet)
+--   ctx.place(pos, dir)           put the car at pos ({x, y, z}) facing dir ({x, y}), repaired
 --   ctx.drive(names, dest, label) Earth's GPS to dest ({lat, lon}) and Earth's autodrive on (no driving of ours);
 --                                 ctx.arrived(): the GPS has let go (it clears itself on arrival)
 --   ctx.stopAi()                  Earth's autodrive off
@@ -36,9 +37,8 @@ M.ROADS_MAX_S = 300        -- s waited at most for the roads round it while Eart
                            -- a first visit's road plans, a busy server)
 M.LOAD_MAX_S = 60          -- s waited at most, once they are in, for the navgraph and a drive through it (and for the
                            -- road's surface at a drive's start)
-M.SURFACE_UP_M = 3.0       -- m over the drive's first node the ray for the road's surface starts (a road over it is
-                           -- higher: a deck's clearance), and
-M.SURFACE_DOWN_M = 8.0     -- ... m under the node it reaches (the road as graded is not at the navgraph's height)
+M.SURFACE_REACH_M = 60     -- m over and under the drive's first node the surfaces are looked for; the car goes on the
+                           -- one nearest the node: its road as built (graded, a deck), not a road over or under it
 M.PLACE_UP_M = 0.5         -- m over that surface the car is put
 M.SETTLE_S = 3             -- s after the roads are in before the drive (the car settles, the GPS route is made)
 M.DRIVE_MAX_S = 90         -- s a drive may take
@@ -244,8 +244,10 @@ end
 local function placeCar()
   local ctx, dv = T.ctx, T.drives[T.k]
   local a, b = dv.at[1], dv.at[2]
-  local top = a.z + M.SURFACE_UP_M
-  local z = ctx.surface(a.x, a.y, top, M.SURFACE_UP_M + M.SURFACE_DOWN_M)
+  local z
+  for _, h in ipairs(ctx.surfaces(a.x, a.y, a.z + M.SURFACE_REACH_M, a.z - M.SURFACE_REACH_M) or {}) do
+    if not z or math.abs(h - a.z) < math.abs(z - a.z) then z = h end
+  end
   if not z then return false end
   ctx.place({ x = a.x, y = a.y, z = z + M.PLACE_UP_M }, { x = b.x - a.x, y = b.y - a.y })
   local e = dv.at[#dv.at]
@@ -301,7 +303,7 @@ function M.update(dt)
       end
       T.roadsIn, T.t = true, 0          -- (the navgraph's wait from here)
     end
-    local nodes = ctx.nodes()
+    local nodes = ctx.nodes(x, y, M.DRIVE_M + 40)
     if not nodes or not next(nodes) then
       if T.t < M.LOAD_MAX_S then return end
       return nextJunction('no navgraph')
