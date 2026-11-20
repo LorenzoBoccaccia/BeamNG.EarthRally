@@ -105,6 +105,7 @@ FAKE = """
       car = { pos = { x = 0, y = 0, z = 0 }, speed = 10 }
       layers = { 0 }        -- (the surfaces the game has, every x, y: heights; none: nothing built there yet)
       moves = true          -- (the AI gets to the drive's end)
+      roadsIn = true        -- (Earth's roads round the junction are in)
       local anchor = {
         geodeticToWorld = function(self, lat, lon, h) return 0, 0, 0 end,
         worldToGeodetic = function(self, x, y, z) return 42 + y / 111320, 13 + x / 82000, 0 end,
@@ -113,7 +114,7 @@ FAKE = """
         anchor = function() return anchor end,
         ready = function() return true end,
         teleport = function(lat, lon, name) calls[#calls + 1] = 'teleport ' .. name; return true end,
-        roadsReady = function() return true end,
+        roadsReady = function() return roadsIn end,
         nodes = function() return nodes end,
         car = function() return car end,
         surface = function(x, y, top, reach)
@@ -214,6 +215,27 @@ def test_the_navgraph_made_again_during_a_drive(lua):
     assert lua.eval("tour.running()") is False
     assert [c for c in calls if c.startswith("teleport")] == ["teleport Junction: one", "teleport Junction: two"]
     assert "log junction tour stopped: all junctions driven" in calls
+
+
+def test_the_tour_waits_while_the_roads_load(lua):
+    # a first visit's roads, a busy server: 150 s before Earth has them (the tour gave up at 60 s, every junction
+    # "no navgraph")
+    straight(lua)
+    lua.execute("roadsIn = false")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 } }, 2000, function(i) if i == 600 then roadsIn = true end end)")
+    calls = names(lua.eval("calls"))
+    assert sum(c.startswith("drive") for c in calls) == 1
+    assert lua.eval("tour.running()") is False
+
+
+def test_roads_that_never_come_are_left(lua):
+    straight(lua)
+    lua.execute("roadsIn = false")
+    lua.execute("run({ { name = 'one', lat = 42, lon = 13 }, { name = 'two', lat = 42, lon = 13 } }, 4000)")
+    calls = names(lua.eval("calls"))
+    assert lua.eval("tour.running()") is False
+    assert not [c for c in calls if c.startswith("drive")]
+    assert sum("the roads round it not in after 300 s" in c for c in calls) == 2
 
 
 def test_the_junctions_file_reads_both_kinds_of_entry(lua):
