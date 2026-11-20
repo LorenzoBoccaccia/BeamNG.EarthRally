@@ -32,7 +32,10 @@ M.LEVEL_M = 4.0            -- m above or below the first drive's node another ro
 M.NEAR_M = 40              -- m round the junction the nodes of a drive may start from (its radius when it has one)
 M.CUTOFF = 0.5             -- a link less drivable than this costs PENALTY times its length (guide.PLANNER's)
 M.PENALTY = 10
-M.LOAD_MAX_S = 60          -- s waited for the roads at most
+M.ROADS_MAX_S = 300        -- s waited at most for the roads round it while Earth is still loading them (a cold cache:
+                           -- a first visit's road plans, a busy server)
+M.LOAD_MAX_S = 60          -- s waited at most, once they are in, for the navgraph and a drive through it (and for the
+                           -- road's surface at a drive's start)
 M.SURFACE_UP_M = 3.0       -- m over the drive's first node the ray for the road's surface starts (a road over it is
                            -- higher: a deck's clearance), and
 M.SURFACE_DOWN_M = 8.0     -- ... m under the node it reaches (the road as graded is not at the navgraph's height)
@@ -279,7 +282,7 @@ function M.update(dt)
     if ctx.ready() then
       local took, why = ctx.teleport(j.lat, j.lon, 'Junction: ' .. j.name)
       if took then
-        T.phase, T.t = 'teleporting', 0
+        T.phase, T.t, T.roadsIn = 'teleporting', 0, false
       elseif T.t > 30 then
         nextJunction('teleport refused: ' .. tostring(why))
       end
@@ -291,7 +294,13 @@ function M.update(dt)
     if not anchor then return end
     local x, y, z = anchor:geodeticToWorld(j.lat, j.lon, 0)
     T.p = { x = x, y = y, z = z }
-    if not ctx.roadsReady(x, y, M.DRIVE_M + 40) and T.t < M.LOAD_MAX_S then return end
+    if not T.roadsIn then
+      if not ctx.roadsReady(x, y, M.DRIVE_M + 40) then
+        if T.t < M.ROADS_MAX_S then return end
+        return nextJunction(string.format('the roads round it not in after %d s', M.ROADS_MAX_S))
+      end
+      T.roadsIn, T.t = true, 0          -- (the navgraph's wait from here)
+    end
     local nodes = ctx.nodes()
     if not nodes or not next(nodes) then
       if T.t < M.LOAD_MAX_S then return end
