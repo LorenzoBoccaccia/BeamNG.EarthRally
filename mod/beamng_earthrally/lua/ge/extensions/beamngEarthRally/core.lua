@@ -2304,6 +2304,13 @@ local function tourCtx()
       end
       return { pos = { x = p.x, y = p.y, z = p.z }, speed = speed }
     end,
+    -- the first static surface (the road as built, a deck, the terrain) a ray down from top finds within reach
+    surface = function(x, y, top, reach)
+      if not (castRayStatic and vec3) then return nil end
+      local hit = castRayStatic(vec3(x, y, top), vec3(0, 0, -1), reach)
+      if hit and hit < reach then return top - hit end
+      return nil
+    end,
     place = function(pos, dir)
       local v = veh()
       if not v then return end

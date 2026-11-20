@@ -3,7 +3,8 @@
 --
 -- For each junction: Earth's teleport to it; the roads round it built (roads.readyAround) and the navgraph in; a
 -- drive through it picked on the navgraph (pick: from a node DRIVE_M before the junction's nearest node to one DRIVE_M
--- past it, the straightest way through, one-way roads only their way); the car put on the start facing the way, Earth's
+-- past it, the straightest way through, one-way roads only their way); the car put on the start facing the way, on the road's surface as
+-- the game has it (waited for: a viaduct's deck comes in later), Earth's
 -- GPS set to the end and its autodrive on (the route and arrows on screen, the car's AI in its lane at the legal
 -- speed); when the GPS says it arrived (or after DRIVE_MAX_S) the next. A junction with a road over another (an overpass, an underpass) is driven on each level: a
 -- second pass from the nearest node standing LEVEL_M above or below the first's.
@@ -15,6 +16,8 @@
 --   ctx.roadsReady(x, y, r)       the roads within r of x, y are in (true when there is nothing to wait for)
 --   ctx.nodes()                   the navgraph's nodes (map.getMap().nodes) or nil
 --   ctx.car()                     { pos = {x, y, z}, speed = m/s } of the player's car or nil
+--   ctx.surface(x, y, top, reach) the height of the first surface the game has (the graded road, a deck, the ground) a
+--                                 ray down from top finds within reach, or nil (nothing there yet)
 --   ctx.place(pos, dir)           put the car at pos ({x, y, z}) facing dir ({x, y})
 --   ctx.drive(names, dest, label) Earth's GPS to dest ({lat, lon}) and Earth's autodrive on (no driving of ours);
 --                                 ctx.arrived(): the GPS has let go (it clears itself on arrival)
@@ -30,6 +33,10 @@ M.NEAR_M = 40              -- m round the junction the nodes of a drive may star
 M.CUTOFF = 0.5             -- a link less drivable than this costs PENALTY times its length (guide.PLANNER's)
 M.PENALTY = 10
 M.LOAD_MAX_S = 60          -- s waited for the roads at most
+M.SURFACE_UP_M = 3.0       -- m over the drive's first node the ray for the road's surface starts (a road over it is
+                           -- higher: a deck's clearance), and
+M.SURFACE_DOWN_M = 8.0     -- ... m under the node it reaches (the road as graded is not at the navgraph's height)
+M.PLACE_UP_M = 0.5         -- m over that surface the car is put
 M.SETTLE_S = 3             -- s after the roads are in before the drive (the car settles, the GPS route is made)
 M.DRIVE_MAX_S = 90         -- s a drive may take
 M.ARRIVE_M = 30            -- m from the end: arrived (Earth's GPS's ROUTE_ARRIVE_M)
@@ -151,7 +158,10 @@ function M.pick(nodes, root, adj)
   local names = {}
   for _, n in ipairs(bestPair.inBy) do names[#names + 1] = n end          -- s .. root
   for i = #bestPair.out - 1, 1, -1 do names[#names + 1] = bestPair.out[i] end  -- past root .. e
-  return { names = names, from = bestPair.s, to = bestPair.e }
+  -- (the points kept with the drive: the navgraph is made again as roads load, and its nodes may be gone by its end)
+  local at = {}
+  for i, n in ipairs(names) do local p = nodes[n].pos; at[i] = { x = p.x, y = p.y, z = p.z } end
+  return { names = names, at = at, from = bestPair.s, to = bestPair.e }
 end
 
 -- The junction's drives: through its nearest node, and through the nearest one on another level (LEVEL_M) if any.
@@ -221,12 +231,21 @@ local function nextJunction(why)
   end
 end
 
+-- The car on the road's surface at the drive's start once the game has it there (the road graded, a deck built): not at
+-- the navgraph's height, which the car fell from (52 m over the ground where a viaduct was not in yet) or was put into a
+-- road under.
 local function beginDrive()
+  T.phase, T.t = 'placing', 0
+end
+
+local function placeCar()
   local ctx, dv = T.ctx, T.drives[T.k]
-  local nodes = T.nodes
-  local a, b = nodes[dv.names[1]].pos, nodes[dv.names[2]].pos
-  ctx.place({ x = a.x, y = a.y, z = a.z + 0.5 }, { x = b.x - a.x, y = b.y - a.y })
-  local e = nodes[dv.to].pos
+  local a, b = dv.at[1], dv.at[2]
+  local top = a.z + M.SURFACE_UP_M
+  local z = ctx.surface(a.x, a.y, top, M.SURFACE_UP_M + M.SURFACE_DOWN_M)
+  if not z then return false end
+  ctx.place({ x = a.x, y = a.y, z = z + M.PLACE_UP_M }, { x = b.x - a.x, y = b.y - a.y })
+  local e = dv.at[#dv.at]
   local anchor = ctx.anchor()
   local j = T.list[T.i]
   local label = string.format('%s%s', j.name, #T.drives > 1 and string.format(' (level %d of %d)', T.k, #T.drives) or '')
@@ -237,6 +256,17 @@ local function beginDrive()
   end
   ctx.say(string.format('Junction %d of %d: %s', T.i, #T.list, label), 6)
   T.phase, T.t, T.slow = 'settle', 0, 0
+  return true
+end
+
+-- the next drive of this junction, or the next junction
+local function nextDrive(why)
+  if T.k < #T.drives then
+    T.k = T.k + 1
+    beginDrive()
+  else
+    nextJunction(why)
+  end
 end
 
 -- every frame (dt: s)
@@ -267,7 +297,6 @@ function M.update(dt)
       if T.t < M.LOAD_MAX_S then return end
       return nextJunction('no navgraph')
     end
-    T.nodes = nodes
     T.drives = M.drives(nodes, T.p, math.max(M.NEAR_M, j.radius or 0))
     if #T.drives == 0 then
       if T.t < M.LOAD_MAX_S then return end             -- (the navgraph may still be filling in)
@@ -275,6 +304,11 @@ function M.update(dt)
     end
     T.k = 1
     beginDrive()
+  elseif T.phase == 'placing' then
+    if not placeCar() and T.t > M.LOAD_MAX_S then
+      T.ctx.log('W', string.format('junction tour: %s, drive %d: no road surface at its start', j.name, T.k))
+      nextDrive('no road surface at its start')
+    end
   elseif T.phase == 'settle' then
     if T.t >= M.SETTLE_S then
       ctx.drive(T.drives[T.k].names, T.dest, 'Junction: ' .. T.label)
@@ -282,7 +316,8 @@ function M.update(dt)
     end
   elseif T.phase == 'driving' then
     local car = ctx.car()
-    local e = T.nodes[T.drives[T.k].to].pos
+    local at = T.drives[T.k].at
+    local e = at[#at]
     local done
     if car and d2(pos3(car.pos), e) <= M.ARRIVE_M then done = 'arrived' end
     if T.t > 5 and ctx.arrived and ctx.arrived() then done = 'arrived (the GPS)' end
@@ -296,14 +331,7 @@ function M.update(dt)
       T.why, T.phase, T.t = done, 'pause', 0
     end
   elseif T.phase == 'pause' then
-    if T.t >= M.PAUSE_S then
-      if T.k < #T.drives then
-        T.k = T.k + 1
-        beginDrive()
-      else
-        nextJunction(T.why)
-      end
-    end
+    if T.t >= M.PAUSE_S then nextDrive(T.why) end
   end
 end
 
