@@ -1616,10 +1616,10 @@ def joined_pairs(argv, names=("--anchor", "--at", "--xy", "--block")):
     return out
 
 
-# (the build's time limit, from the evals' own build times: the median side builds in about a minute, Yokohama in 25-35
-# minutes, the Shanghai interchanges in 2-4 hours, and the slowest legitimate one, Yan'an / Puxi's after side, took
-# 15025 s on 2026-11-19 (rr/9e22fc3bf/all24); the limit is about twice that, so only a build that is hung runs out)
-JUNCTION_TIMEOUT_S = 28800
+# (the build's time limit: a limit is there to make slowness fail loudly, not to fit today's worst case. Upstream's slowest
+# cold build is Yokohama's, 1374 s, the median builds in about a minute, and the game's tour gives the player 300 s anyway;
+# the Shanghai interchanges take hours and fail it: the fix is the build, not a looser limit)
+JUNCTION_TIMEOUT_S = 1800
 TIMEOUT_RC = 124                # the exit status of a build stopped by its limit (as timeout(1))
 
 
@@ -1711,7 +1711,7 @@ def main():
     ap.add_argument("--no-airports", action="store_true")
     ap.add_argument("--no-sea", action="store_true")
     ap.add_argument("--timeout", type=float, default=JUNCTION_TIMEOUT_S, help="s the build may take (default "
-                    f"{JUNCTION_TIMEOUT_S}, about twice the slowest legitimate one): then every thread's stack goes to the log "
+                    f"{JUNCTION_TIMEOUT_S}, above the slowest upstream cold build): then every thread's stack goes to the log "
                     f"and the build and its children are stopped, exit status {TIMEOUT_RC}; 0 for no limit")
     a = ap.parse_args(joined_pairs(sys.argv[1:]))
     if not a.earth:
