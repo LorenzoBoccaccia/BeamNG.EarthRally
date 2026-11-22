@@ -30,7 +30,11 @@ hitting, meshes cutting) and an after side's build at its first infeasible syste
 junction at a time; with --history <json> the junctions red last time run first, the quickest first. --before-from <a former run's out> takes the before sides from
 that run as they are (an upstream capture made once: python tools/earth_eval.py --before <upstream tree> --after <tree>
 --out <capture> --labels upstream,latest; then each run --before-from <capture>, only the after tree built), and
-tools/eval_page.py makes one page of a run. --reuse draws from the data a former run left (no build), --online
+tools/eval_page.py makes one page of a run.
+--junction-timeout S (default 28800, about twice the slowest valid side: Yan'an / Puxi's after side took 15025 s) is the time a
+junction's builds, both sides together, may take: over it the build's process tree is stopped (earth_view's own --timeout first,
+with every thread's stack in its view.log), the junction's report row says "timeout" with the time, the next junction runs, and
+the exit status is 1 at the end; --fail-fast does not stop the round for it. 0 is no limit. --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
 """
 import argparse
@@ -66,6 +70,13 @@ DIFF_FULL_M = 2.0               # m of rise or fall drawn at the full colour
 FAIL_LINES = re.compile(r"infeasible system|infeasible network|Traceback \(most recent call last\)|"
                         r"memory allocation of \d+ bytes failed")
 WATCH_S = 2.0                   # s between two reads of a watched build's log
+KILL_GRACE_S = 60.0             # s a build's own limit (earth_view --timeout) comes before the one earth_eval keeps on it
+# (a junction's builds, both sides together, may take ev.JUNCTION_TIMEOUT_S: see there for where it comes from. Over it the
+# build's process tree is stopped, the junction's row says "timeout" and the next junction runs)
+
+
+class BuildTimeout(Exception):
+    """A build went over its junction's time limit and was stopped."""
 
 
 def load_set(path):
@@ -99,9 +110,10 @@ def side_dir(a, name, side):
     return os.path.join(a.out, name, side)
 
 
-def build_side(j, side, tree, a, log):
+def build_side(j, side, tree, a, log, deadline=None):
     """Draw junction j from Earth tree into its side's folder (side_dir; earth_view, its own process). Returns the error or
-    None. The before side taken from --before-from is not built: an error if that run has no such junction."""
+    None. The before side taken from --before-from is not built: an error if that run has no such junction. A build still
+    running at deadline (time.time(); None: no limit) is stopped with its children: BuildTimeout."""
     out = side_dir(a, j["name"], side)
     if side == "before" and getattr(a, "before_from", None):
         ok = os.path.isfile(os.path.join(out, "view_surface.npz"))
@@ -117,13 +129,22 @@ def build_side(j, side, tree, a, log):
             cmd.append("--" + flag.replace("_", "-"))
     if a.cache:
         cmd += ["--cache", a.cache]
+    left = None
+    if deadline is not None:
+        left = deadline - time.time()
+        if left <= 0:
+            raise BuildTimeout(f"{side}: no time left")
+        cmd += ["--timeout", f"{left:.0f}"]     # (its own limit first: it logs every thread's stack; ours is the backstop)
     # (both sides built under the same conditions: Earth plans a place without its lidar when the lidar's read takes
     # longer than BNE_LIDAR_GAPS_WAIT (8 s), and the first side to build a cold place fetched it while the second found it
     # cached: Boston's Bowker "fell" 4-6 m between two identical trees. The wait pre-cache uses, so neither side gives up)
     env = dict(os.environ, BNGE_PLANCACHE="off", BNGE_BLOCKCACHE="off", BNE_LIDAR_GAPS_WAIT=LIDAR_WAIT_S)
     t = time.time()
     watch = FAIL_LINES if side == "after" and getattr(a, "fail_fast", False) else None
-    rc, line = run_watched(cmd, os.path.join(out, "view.log"), env, REPO, watch)
+    limit = {} if left is None else {"timeout": left + KILL_GRACE_S}
+    rc, line = run_watched(cmd, os.path.join(out, "view.log"), env, REPO, watch, **limit)
+    if rc == ev.TIMEOUT_RC and left is not None:
+        raise BuildTimeout(f"{side}: stopped by its own limit after {time.time() - t:.0f} s (see {out}/view.log)")
     if line is not None:
         log(f"  {side}: stopped after {time.time() - t:.0f} s at: {line[:200]}")
         return f"failed early: {line[:300]}"
@@ -146,16 +167,30 @@ def kill_tree(p):
     p.wait()
 
 
-def run_watched(cmd, log_path, env, cwd, watch=None):
+def run_watched(cmd, log_path, env, cwd, watch=None, timeout=None):
     """(returncode, the first log line watch matched or None): cmd run with its output in log_path; with watch (a regex),
-    its log read every WATCH_S as it is written and the process tree stopped at the first line watch matches."""
+    its log read every WATCH_S as it is written and the process tree stopped at the first line watch matches. Still running
+    after timeout seconds (None: no limit): its process tree is stopped and BuildTimeout raised."""
     with open(log_path, "w", encoding="utf-8") as f:
         p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd,
                              start_new_session=sys.platform != "win32")
+        end = None if timeout is None else time.time() + timeout
+
+        def over():
+            if end is not None and time.time() >= end and p.poll() is None:
+                kill_tree(p)
+                f.write(f"\ntimeout: stopped by earth_eval after {timeout:.0f} s with its children\n")
+                f.flush()
+                raise BuildTimeout(f"stopped after {timeout:.0f} s")
         if watch is None:
-            return p.wait(), None
+            while True:
+                try:
+                    return p.wait(None if end is None else max(0.01, min(WATCH_S, end - time.time()))), None
+                except subprocess.TimeoutExpired:
+                    over()
         pos, rest = 0, ""
         while True:
+            over()
             done = p.poll() is not None
             with open(log_path, encoding="utf-8", errors="replace") as r:
                 r.seek(pos)
@@ -360,8 +395,19 @@ def load_timing(side):
 def run_junction(j, a, log):
     log(f"{j['name']}: {j.get('what', '')}")
     res = {"name": j["name"], "what": j.get("what", "")}
-    errs = [e for e in (build_side(j, side, tree, a, log) for side, tree in zip(SIDES, (a.before, a.after))
-                        if side in getattr(a, "sides", SIDES)) if e]
+    limit = getattr(a, "junction_timeout", 0) or 0
+    t0 = time.time()
+    deadline = t0 + limit if limit > 0 else None
+    kw = {} if deadline is None else {"deadline": deadline}     # (the limit is for the junction's builds together)
+    errs = []
+    try:
+        errs = [e for e in (build_side(j, side, tree, a, log, **kw) for side, tree in zip(SIDES, (a.before, a.after))
+                            if side in getattr(a, "sides", SIDES)) if e]
+    except BuildTimeout as e:
+        took = time.time() - t0
+        res.update(timeout=True, timeout_s=round(took), limit_s=limit)
+        errs = [f"timeout after {took:.0f} s (limit {limit:g} s): {e}"]
+        log(f"  {errs[0]}; its processes were stopped, on to the next junction")
     if tuple(getattr(a, "sides", SIDES)) == ("before",):      # (a capture of the before side only: no comparison)
         if errs:
             res["error"] = "; ".join(errs)
@@ -452,6 +498,9 @@ def write_report(results, a):
     rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max | vehicles hitting "
             "| crossings cutting | cutting in 1 km |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
+        if r.get("timeout"):
+            rows.append(f"| {r['name']} | **timeout** after {r['timeout_s']} s (limit {r['limit_s']:g} s) | | | | | | | | |")
+            continue
         if r.get("error"):
             rows.append(f"| {r['name']} | error: {r['error']} | | | | | | | | |")
             continue
@@ -505,6 +554,10 @@ def main(argv=None):
     ap.add_argument("--fail-fast", action="store_true", help="stop at the first red junction (exit 1), one junction at a "
                     "time, and stop an after side's build at its first infeasible system / network, Python error or "
                     "failed allocation (FAIL_LINES); with --history, the junctions red last time first")
+    ap.add_argument("--junction-timeout", type=float, default=ev.JUNCTION_TIMEOUT_S, help="s a junction's builds (both "
+                    f"sides together) may take (default {ev.JUNCTION_TIMEOUT_S}, about twice the slowest valid side, "
+                    "Yan'an / Puxi's 15025 s): then its process tree is stopped, its report row says timeout and the next "
+                    "junction runs (the exit status is 1 at the end); 0 for no limit")
     ap.add_argument("--history", help="a json of each junction's last result (red, seconds), read for --fail-fast's "
                     "order and written after each junction")
     ap.add_argument("--fail-on-change", action="store_true", help="exit 1 if a junction not in --expect changed")
@@ -549,11 +602,12 @@ def main(argv=None):
             t = time.time()
             results.append(run_junction(j, a, log))
             why = red(results[-1]) if a.sides != ["before"] else results[-1].get("error")
-            if a.history:
-                history[j["name"]] = {"red": bool(why), "s": round(time.time() - t, 1)}
+            timed_out = bool(results[-1].get("timeout"))
+            if a.history:       # (a timeout is no verdict: not red, but its seconds put it behind the junctions that finish)
+                history[j["name"]] = {"red": bool(why) and not timed_out, "s": round(time.time() - t, 1)}
                 with open(a.history, "w", encoding="utf-8") as f:
                     json.dump(history, f, indent=1, sort_keys=True)
-            if a.fail_fast and why:
+            if a.fail_fast and why and not timed_out:     # (a junction that ran out of time does not stop the round)
                 left = [x["name"] for x in junctions[i + 1:]]
                 log(f"fail-fast: {j['name']} is red ({why}); stopped" + (f", not run: {', '.join(left)}" if left else ""))
                 break
@@ -561,17 +615,20 @@ def main(argv=None):
         if a.sides != ["before"]:
             log(write_report(results, a))
         return 1
+    timeouts = [r["name"] for r in results if r.get("timeout")]
     if a.sides == ["before"]:
         bad = [r["name"] for r in results if r.get("error")]
         log(f"captured {len(results) - len(bad)} of {len(results)} before sides" + (f"; failed: {', '.join(bad)}" if bad else ""))
         return 1 if bad else 0
     log(write_report(results, a))
+    if timeouts:
+        log(f"timeout (over {a.junction_timeout:g} s): {', '.join(timeouts)}")
     expect = {s.strip() for s in a.expect.split(",") if s.strip()}
     bad = [r["name"] for r in results if (r.get("changed") or r.get("worse")) and r["name"] not in expect]
     if a.fail_on_change and bad:
         log(f"changed and not expected: {', '.join(bad)}")
         return 1
-    return 0
+    return 1 if timeouts else 0     # (a junction that did not finish is not a pass)
 
 
 if __name__ == "__main__":
