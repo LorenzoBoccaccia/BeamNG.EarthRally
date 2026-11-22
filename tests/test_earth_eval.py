@@ -304,13 +304,17 @@ def test_a_build_over_its_time_is_stopped_with_its_children_and_the_row_says_tim
     assert "| hang_one | **timeout** after " in table and "limit 3 s" in table
 
 
-def test_the_limit_is_for_the_junctions_builds_together(tmp_path, monkeypatch):
+def test_the_limit_is_for_each_sides_build(tmp_path, monkeypatch):
     fake_tree(tmp_path, monkeypatch)
-    a = args(tmp_path, junction_timeout=3.0)
-    # (each side takes 2 s: the before side fits, the after side has 1 s left)
-    res = ee.run_junction({"name": "slowside", "at": [1.0, 2.0], "anchor": [1.0, 2.0]}, a, lambda m: None)
-    assert res.get("timeout") is True
-    kid = int((tmp_path / "out" / "slowside" / "after" / "kid.pid").read_text())
+    # (each side takes 2 s: both fit in a limit of 3 s, a cold junction builds both)
+    res = ee.run_junction({"name": "slowside", "at": [1.0, 2.0], "anchor": [1.0, 2.0]}, args(tmp_path, junction_timeout=3.0),
+                          lambda m: None)
+    assert not res.get("timeout")
+    # (and the first side runs out of a limit of 1 s)
+    res = ee.run_junction({"name": "slowside", "at": [1.0, 2.0], "anchor": [1.0, 2.0]}, args(tmp_path, junction_timeout=1.0),
+                          lambda m: None)
+    assert res.get("timeout") is True and res["timeout_s"] < 30
+    kid = int((tmp_path / "out" / "slowside" / "before" / "kid.pid").read_text())
     __import__("time").sleep(1)
     assert not alive(kid)
 
@@ -331,7 +335,7 @@ def test_a_timed_out_junction_does_not_stop_the_round_and_the_exit_status_says_s
 
 
 def test_the_default_limit_is_well_over_the_slowest_build_seen(tmp_path):
-    assert ev.JUNCTION_TIMEOUT_S >= 2 * 15025 - 3000       # (Yan'an / Puxi's after side: 15025 s, 2026-11-19)
+    assert 1374 < ev.JUNCTION_TIMEOUT_S <= 1800       # (above upstream's slowest cold build, Yokohama's 1374 s; not a lax one)
     import subprocess
     out = subprocess.run([sys.executable, os.path.join(os.path.dirname(ee.__file__), "earth_eval.py"), "--help"],
                          capture_output=True, text=True, encoding="utf-8").stdout

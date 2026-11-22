@@ -31,8 +31,8 @@ junction at a time; with --history <json> the junctions red last time run first,
 that run as they are (an upstream capture made once: python tools/earth_eval.py --before <upstream tree> --after <tree>
 --out <capture> --labels upstream,latest; then each run --before-from <capture>, only the after tree built), and
 tools/eval_page.py makes one page of a run.
---junction-timeout S (default 28800, about twice the slowest valid side: Yan'an / Puxi's after side took 15025 s) is the time a
-junction's builds, both sides together, may take: over it the build's process tree is stopped (earth_view's own --timeout first,
+--junction-timeout S (default 1800, above the slowest upstream cold build, Yokohama's 1374 s, and the game's tour gives the player
+300 s anyway) is the time a junction's build, each side's, may take: over it the build's process tree is stopped (earth_view's own --timeout first,
 with every thread's stack in its view.log), the junction's report row says "timeout" with the time, the next junction runs, and
 the exit status is 1 at the end; --fail-fast does not stop the round for it. 0 is no limit. --reuse draws from the data a former run left (no build), --online
 fetches the map data the cache lacks (a junction never built before needs it).
@@ -396,15 +396,17 @@ def run_junction(j, a, log):
     log(f"{j['name']}: {j.get('what', '')}")
     res = {"name": j["name"], "what": j.get("what", "")}
     limit = getattr(a, "junction_timeout", 0) or 0
-    t0 = time.time()
-    deadline = t0 + limit if limit > 0 else None
-    kw = {} if deadline is None else {"deadline": deadline}     # (the limit is for the junction's builds together)
+    began = [time.time()]
+
+    def build(side, tree):          # (the limit is for each side's build: a cold junction builds both)
+        began[0] = time.time()
+        return build_side(j, side, tree, a, log, **({"deadline": began[0] + limit} if limit > 0 else {}))
     errs = []
     try:
-        errs = [e for e in (build_side(j, side, tree, a, log, **kw) for side, tree in zip(SIDES, (a.before, a.after))
+        errs = [e for e in (build(side, tree) for side, tree in zip(SIDES, (a.before, a.after))
                             if side in getattr(a, "sides", SIDES)) if e]
     except BuildTimeout as e:
-        took = time.time() - t0
+        took = time.time() - began[0]
         res.update(timeout=True, timeout_s=round(took), limit_s=limit)
         errs = [f"timeout after {took:.0f} s (limit {limit:g} s): {e}"]
         log(f"  {errs[0]}; its processes were stopped, on to the next junction")
@@ -554,9 +556,9 @@ def main(argv=None):
     ap.add_argument("--fail-fast", action="store_true", help="stop at the first red junction (exit 1), one junction at a "
                     "time, and stop an after side's build at its first infeasible system / network, Python error or "
                     "failed allocation (FAIL_LINES); with --history, the junctions red last time first")
-    ap.add_argument("--junction-timeout", type=float, default=ev.JUNCTION_TIMEOUT_S, help="s a junction's builds (both "
-                    f"sides together) may take (default {ev.JUNCTION_TIMEOUT_S}, about twice the slowest valid side, "
-                    "Yan'an / Puxi's 15025 s): then its process tree is stopped, its report row says timeout and the next "
+    ap.add_argument("--junction-timeout", type=float, default=ev.JUNCTION_TIMEOUT_S, help="s a junction's build "
+                    f"(each side's) may take (default {ev.JUNCTION_TIMEOUT_S}, above the slowest upstream cold build, "
+                    "Yokohama's 1374 s): then its process tree is stopped, its report row says timeout and the next "
                     "junction runs (the exit status is 1 at the end); 0 for no limit")
     ap.add_argument("--history", help="a json of each junction's last result (red, seconds), read for --fail-fast's "
                     "order and written after each junction")
