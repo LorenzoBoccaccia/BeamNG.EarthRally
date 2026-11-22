@@ -155,7 +155,7 @@ def test_the_page_lists_the_worst_junction_first_with_both_sides(tmp_path):
 def test_a_before_only_capture_builds_no_after_side(tmp_path, monkeypatch):
     import types
     built = []
-    monkeypatch.setattr(ee, "build_side", lambda j, side, tree, a, log: built.append(side))
+    monkeypatch.setattr(ee, "build_side", lambda j, side, tree, a, log, **kw: built.append(side))
     a = types.SimpleNamespace(out=str(tmp_path), before="b", after="a", sides=["before"])
     res = ee.run_junction({"name": "x"}, a, lambda m: None)
     assert built == ["before"] and "error" not in res
@@ -235,3 +235,116 @@ def test_fail_fast_stops_at_the_first_red_junction_and_writes_the_history(tmp_pa
     ee.main(["--before", str(tmp_path), "--after", str(tmp_path), "--out", str(tmp_path / "o"), "--fail-fast",
              "--history", str(hist)])
     assert ran == ["b"], "the red one first next time, and stopped there"
+
+
+# --- the time limit on a junction's builds (the evals' hung builds held the lock and the memory for hours) ---
+
+FAKE_VIEW = '''
+import argparse, os, subprocess, sys, time
+ap = argparse.ArgumentParser()
+ap.add_argument("--out"); ap.add_argument("--timeout", type=float, default=0)
+a, _ = ap.parse_known_args()
+print("fake build", a.out, "timeout", a.timeout, flush=True)
+os.makedirs(os.path.join(a.out, "data"), exist_ok=True)
+if "hang" in a.out or "slowside" in a.out:
+    # (a child of its own, as Earth's server: it must not outlive the build)
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    open(os.path.join(a.out, "kid.pid"), "w").write(str(kid.pid))
+    time.sleep(2 if "slowside" in a.out else 600)
+    kid.kill()
+'''
+
+
+def fake_tree(tmp_path, monkeypatch):
+    here = tmp_path / "tools"
+    here.mkdir()
+    (here / "earth_view.py").write_text(FAKE_VIEW, encoding="utf-8")
+    monkeypatch.setattr(ee, "HERE", str(here))
+    monkeypatch.setattr(ee, "KILL_GRACE_S", 1.0)
+    monkeypatch.setattr(ee, "load_timing", lambda side: {})
+    monkeypatch.setattr(ee, "eval_picture", lambda j, a, res, log: "")
+
+
+def alive(pid):
+    import subprocess
+    if sys.platform == "win32":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def args(tmp_path, **kw):
+    import types
+    base = dict(out=str(tmp_path / "out"), before="b", after="a", labels=["b", "a"], image="520x360", views="top",
+                reuse=False, online=False, no_buildings=False, cache=None, sides=["before", "after"], before_from=None,
+                fail_fast=False, junction_timeout=3.0)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_a_build_over_its_time_is_stopped_with_its_children_and_the_row_says_timeout(tmp_path, monkeypatch):
+    fake_tree(tmp_path, monkeypatch)
+    a = args(tmp_path)
+    logs = []
+    t = __import__("time").time()
+    res = ee.run_junction({"name": "hang_one", "at": [1.0, 2.0], "anchor": [1.0, 2.0]}, a, logs.append)
+    took = __import__("time").time() - t
+    assert took < 30, "stopped, not waited for"
+    assert res["timeout"] is True and "timeout after" in res["error"] and res["limit_s"] == 3.0
+    assert res["timeout_s"] >= 3
+    kid = int((tmp_path / "out" / "hang_one" / "before" / "kid.pid").read_text())
+    __import__("time").sleep(1)
+    assert not alive(kid), "the build's own child went with it"
+    a.out = str(tmp_path / "out")
+    table = ee.write_report([res], a)
+    assert "| hang_one | **timeout** after " in table and "limit 3 s" in table
+
+
+def test_the_limit_is_for_the_junctions_builds_together(tmp_path, monkeypatch):
+    fake_tree(tmp_path, monkeypatch)
+    a = args(tmp_path, junction_timeout=3.0)
+    # (each side takes 2 s: the before side fits, the after side has 1 s left)
+    res = ee.run_junction({"name": "slowside", "at": [1.0, 2.0], "anchor": [1.0, 2.0]}, a, lambda m: None)
+    assert res.get("timeout") is True
+    kid = int((tmp_path / "out" / "slowside" / "after" / "kid.pid").read_text())
+    __import__("time").sleep(1)
+    assert not alive(kid)
+
+
+def test_a_timed_out_junction_does_not_stop_the_round_and_the_exit_status_says_so(tmp_path, monkeypatch):
+    fake_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(ee, "load_set", lambda p: [{"name": n, "at": [1.0, 2.0], "anchor": [1.0, 2.0]}
+                                                   for n in ("hang_first", "quick_second")])
+    hist = tmp_path / "h.json"
+    logs = []
+    monkeypatch.setattr(ee, "write_report", lambda results, a: logs.append([r["name"] for r in results]) or "report")
+    rc = ee.main(["--before", str(tmp_path), "--after", str(tmp_path), "--out", str(tmp_path / "o"), "--fail-fast",
+                  "--history", str(hist), "--junction-timeout", "2"])
+    assert rc == 1
+    assert logs == [["hang_first", "quick_second"]], "the second junction ran after the first one timed out"
+    h = json.loads(hist.read_text())
+    assert not h["hang_first"]["red"] and h["hang_first"]["s"] >= 2 and "quick_second" in h
+
+
+def test_the_default_limit_is_well_over_the_slowest_build_seen(tmp_path):
+    assert ev.JUNCTION_TIMEOUT_S >= 2 * 15025 - 3000       # (Yan'an / Puxi's after side: 15025 s, 2026-11-19)
+    import subprocess
+    out = subprocess.run([sys.executable, os.path.join(os.path.dirname(ee.__file__), "earth_eval.py"), "--help"],
+                         capture_output=True, text=True, encoding="utf-8").stdout
+    assert "--junction-timeout" in out and str(ev.JUNCTION_TIMEOUT_S) in out
+
+
+def test_a_build_s_own_limit_logs_every_threads_stack_and_exits_with_its_status(tmp_path):
+    import subprocess
+    code = ("import sys, time; sys.path.insert(0, %r); import earth_view as ev\n"
+            "ev.arm_timeout(2, lambda m: print(m, flush=True))\n"
+            "time.sleep(600)\n" % os.path.dirname(ee.__file__))
+    t = __import__("time").time()
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert __import__("time").time() - t < 60
+    assert r.returncode == ev.TIMEOUT_RC
+    assert "timeout: the build ran over" in r.stdout and "most recent call first" in r.stderr

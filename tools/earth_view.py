@@ -59,11 +59,15 @@ former run left in <out>/data (a new camera, radius, kinds) without building. Le
 a geotile's far meshes, the game's runtime colliders; a building is the tile's own mesh, as the game draws it near the car.
 """
 import argparse
+import faulthandler
 import json
 import math
 import os
 import re
+import signal
+import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -1612,6 +1616,55 @@ def joined_pairs(argv, names=("--anchor", "--at", "--xy", "--block")):
     return out
 
 
+# (the build's time limit, from the evals' own build times: the median side builds in about a minute, Yokohama in 25-35
+# minutes, the Shanghai interchanges in 2-4 hours, and the slowest legitimate one, Yan'an / Puxi's after side, took
+# 15025 s on 2026-11-19 (rr/9e22fc3bf/all24); the limit is about twice that, so only a build that is hung runs out)
+JUNCTION_TIMEOUT_S = 28800
+TIMEOUT_RC = 124                # the exit status of a build stopped by its limit (as timeout(1))
+
+
+def kill_own_tree():
+    """Everything this process started (Earth's server and its workers), then exit with TIMEOUT_RC."""
+    pid = os.getpid()
+    try:
+        if sys.platform == "win32":
+            # (taskkill /T on this process would end it too, with status 1: its children one by one, each with its tree)
+            ask = f"(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"
+            kids = subprocess.run(["powershell", "-NoProfile", "-Command", ask], capture_output=True, text=True,
+                                  timeout=120).stdout.split()
+            for kid in kids:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", kid], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+        elif os.getpgrp() == pid:               # (the leader of its own group, as earth_eval starts it: the group is its tree)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            os.killpg(pid, signal.SIGTERM)
+        else:                                   # (a group shared with a shell: only what this process started)
+            subprocess.run(["pkill", "-KILL", "-P", str(pid)], timeout=60)
+    except Exception:
+        pass
+    os._exit(TIMEOUT_RC)
+
+
+def arm_timeout(seconds, log):
+    """After seconds (0: never) of this build, write every thread's stack to the log and stop this process and its children
+    with TIMEOUT_RC. A backstop for a build nobody is watching (earth_eval stops it too, a minute later, when it is its
+    parent): a build that hung for hours held the evals' lock and the machine's memory."""
+    if seconds <= 0:
+        return None
+
+    def fire():
+        log(f"timeout: the build ran over {seconds:g} s (--timeout); every thread's stack, then this process and what it "
+            f"started are stopped")
+        sys.stdout.flush()
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        sys.stderr.flush()
+        kill_own_tree()
+    t = threading.Timer(seconds, fire)
+    t.daemon = True
+    t.start()
+    return t
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--earth", default=os.environ.get("BEAMNG_EARTH_DIR"), help="Earth source tree (its server/); read only")
@@ -1657,6 +1710,9 @@ def main():
     ap.add_argument("--online", action="store_true", help="fetch the map data the cache lacks")
     ap.add_argument("--no-airports", action="store_true")
     ap.add_argument("--no-sea", action="store_true")
+    ap.add_argument("--timeout", type=float, default=JUNCTION_TIMEOUT_S, help="s the build may take (default "
+                    f"{JUNCTION_TIMEOUT_S}, about twice the slowest legitimate one): then every thread's stack goes to the log "
+                    f"and the build and its children are stopped, exit status {TIMEOUT_RC}; 0 for no limit")
     a = ap.parse_args(joined_pairs(sys.argv[1:]))
     if not a.earth:
         sys.exit("--earth (or BEAMNG_EARTH_DIR) is needed")
@@ -1668,6 +1724,7 @@ def main():
     def log(msg):
         print(msg, flush=True)
 
+    arm_timeout(a.timeout, log)
     os.environ["BNGE_BLOCKCACHE"] = "off"       # (a block from Earth's disk cache of graded blocks would skip the build)
     import earth_trace
     earth_trace.load_earth(a.earth)
