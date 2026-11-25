@@ -589,7 +589,7 @@ class _Scene:
         self.ground = Tops(tris[np.isin(cls, classes["ground"])])
         self.deck = Tops(_facing_up(tris[cls == classes["deck"]], up))
         self.tunnel = Tops(tris[cls == classes["tunnel"]])
-        self.road = Tops(tris[cls == classes["road"]] if "road" in classes else tris[:0])
+        self.road = Tops(_facing_up(tris[cls == classes["road"]], up) if "road" in classes else tris[:0])
         self.roads = _road_lines(lines)
         self.corridors = []     # per road: {level: [(a stretch's polyline (k, 2), its bounding box)]}, level "ground", "bridge", "tunnel"
         self.bounds = []        # per road: the points where its level can change or it ends: its ends and its stretches' ends
