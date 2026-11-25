@@ -429,3 +429,40 @@ def test_a_deck_ending_0_5_m_below_its_approach_counts():
     assert ck.count_ends(rc["ends"], "broken") == 2
     assert {s["kind"] for s in rc["steps"]} == {"bridge"} and ck.count_steps(rc["steps"]) == 15.6
     assert {round(abs(s["z_edge"] - s["z_beyond"]), 2) for s in rc["steps"]} == {0.5}
+
+
+def earth_slab(x0, x1, y0, y1, top, depth):
+    """A closed slab wound as Earth's .cdae are (the driving surface's normal points down, the underside's up): its top at `top`, its
+    underside depth under it, its end and side faces vertical."""
+    z0 = top - depth
+    t = plate(x0, x1, y0, y1, top)[:, ::-1]
+    u = plate(x0, x1, y0, y1, z0)
+    walls = []
+    for (ax, ay), (bx, by) in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))):
+        a, b = (ax, ay, z0), (bx, by, z0)
+        walls += [(a, b, (bx, by, top)), (a, (bx, by, top), (ax, ay, top))]
+    return np.concatenate([t, u, np.array(walls, np.float64)])
+
+
+def _slab_bridge_ends(top, depth, approach_z=3.0):
+    """_bridge_ends with Earth's winding: a slab of this depth, its top at `top`, and a road mesh (wound down, far off) that tells it."""
+    terrain = heightfield([-80.0, -20.0, -19.99, 19.99, 20.0, 80.0], [-40.0, 40.0], lambda x, y: approach_z if abs(x) > 19.995 else 0.0)
+    road = plate(60.0, 70.0, 30.0, 33.0, approach_z)[:, ::-1]
+    tris, cls = road_scene(terrain, [earth_slab(-20.0, 20.0, -3.9, 3.9, top, depth)], [road])
+    return ck.road_checks(tris, cls, lines_of(line([(-60, 0), (60, 0)], [(1 / 3, 2 / 3, "bridge")], 4.0, "br")), CLASSES)
+
+
+def test_a_slab_of_any_depth_wound_as_earths_are_with_its_top_flush_with_the_approach_counts_nothing():
+    # (its underside, 0.9 or 2.0 m down, faces up by the winding: the road is the top, whatever the slab's depth)
+    for depth in (0.9, 2.0):
+        rc = _slab_bridge_ends(3.0, depth)
+        assert rc["steps"] == [] and ck.count_ends(rc["ends"], "broken") == 0, depth
+        assert {round(e["z"], 2) for e in rc["ends"] if e["what"] == "bridge"} == {3.0}
+
+
+def test_a_slab_whose_top_is_0_5_m_under_the_approach_counts_at_any_depth():
+    for depth in (0.9, 2.0):
+        rc = _slab_bridge_ends(2.5, depth)
+        assert ck.count_ends(rc["ends"], "broken") == 2, depth
+        assert {round(abs(s["z_edge"] - s["z_beyond"]), 2) for s in rc["steps"]} == {0.5}
+        assert {round(s["z_edge"], 2) for s in rc["steps"]} == {2.5}

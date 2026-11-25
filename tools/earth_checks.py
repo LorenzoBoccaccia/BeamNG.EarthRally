@@ -41,6 +41,8 @@ SAMPLE_M = 1.0              # m between the samples across a ground road's end
 END_SEEK_M = 10.0           # m either side of the end the map's line puts there the mesh's end edge is looked for
 LEVEL_M = 2.0               # m: a deck or tube is the same level as an end if it lies within this of it at the same xy (a road passing
                             # over or under it is 4 m or more off); a gap of this or more is another level, not a step
+DRIVE_NZ = 0.5              # a face drives if its normal's z is at least this (a slope up to 60 degrees: not a slab's end or side face, which leans a hair
+                            # outward at most, nor its underside)
 SLAB_M = 1.5                # m: a deck's underside lies this near under its top at most (a deck stacked over another is farther)
 NODE_TOL_M = 0.05           # m: a line's end is the OSM node whose connector lies this near it (Overture's lie on the ends)
 
@@ -558,14 +560,34 @@ def _lateral(t, half):
     return -half + (np.arange(m) + 0.5) * w, np.full(m, w), np.array([-t[1], t[0]])
 
 
+def _up_sign(tris, cls, classes):
+    """+1 or -1: the sign of the z of the normals (winding) of the faces that look up in this scene, read from its road mesh (a single
+    surface, all facing up: the majority of its flat faces), +1 where there is none. Earth's .cdae meshes are wound the other way
+    (-1: a deck's driving surface faces down by its winding, and its underside up)."""
+    if "road" not in classes:
+        return 1.0
+    t = tris[cls == classes["road"]]
+    if not len(t):
+        return 1.0
+    nz = _normals(t)[:, 2]
+    flat = np.abs(nz) >= 0.8
+    return 1.0 if (nz[flat] > 0).sum() >= (nz[flat] < 0).sum() else -1.0
+
+
+def _facing_up(t, up):
+    """t (n, 3, 3) wound so the faces that look up have a normal of positive z (what Tops reads): reversed if up is -1."""
+    return t[:, ::-1] if up < 0 and len(t) else t
+
+
 class _Scene:
     """What the road checks read: the heights of the terrain, the decks and the tubes, and where each road's ground, bridge and
     long tunnel stretches run (their corridors), by the map's own levels."""
 
     def __init__(self, tris, cls, lines, classes):
         tris, cls = np.asarray(tris, np.float64), np.asarray(cls)
+        up = _up_sign(tris, cls, classes)
         self.ground = Tops(tris[np.isin(cls, classes["ground"])])
-        self.deck = Tops(tris[cls == classes["deck"]])
+        self.deck = Tops(_facing_up(tris[cls == classes["deck"]], up))
         self.tunnel = Tops(tris[cls == classes["tunnel"]])
         self.road = Tops(tris[cls == classes["road"]] if "road" in classes else tris[:0])
         self.roads = _road_lines(lines)
@@ -675,16 +697,17 @@ def _end_edges(tops, own, P0, tg, half):
     (triangle indices of tops) of a bridge or tube end at P0 (unit tangent tg out of the structure): the piece's boundary edges
     across the road within END_SEEK_M of P0, facing out, cut to the carriageway's width (half either side of the line: not the
     edge's tips beyond it), and only where they are the piece's driving surface, not an underside or a side under it."""
-    A, B, ti = tops.boundary()
-    k = np.isin(ti, own)
-    A, B, ti = A[k], B[k], ti[k]
+    # (the driving surface alone: the piece's faces that face up, not the end and side faces of its slab, even where they lean a hair
+    # outward: their lower edges are the slab's depth below the road)
+    own = np.asarray(sorted(own), np.int64)
+    top = Tops(tops.t[own][_normals(tops.t[own])[:, 2] >= DRIVE_NZ])
+    A, B, ti = top.boundary()
     if not len(A):
         return []
     nrm = np.array([-tg[1], tg[0]])
     mid, d = (A + B) / 2, B[:, :2] - A[:, :2]
-    cen = tops.t[ti].mean(axis=1)[:, :2]
+    cen = top.t[ti].mean(axis=1)[:, :2]
     ok = (np.abs((mid[:, :2] - P0) @ tg) <= END_SEEK_M) & (np.abs(d @ tg) < np.abs(d @ nrm)) & (((cen - mid[:, :2]) @ tg) < 0)
-    top = Tops(tops.t[own])
     out = []
     for e in np.flatnonzero(ok):
         la, lb = (A[e, :2] - P0) @ nrm, (B[e, :2] - P0) @ nrm
