@@ -784,12 +784,14 @@ def road_checks(tris, cls, lines, classes, box=None):
                 on_ground |= m
             za, zb = S.ground.lowest(A[:, :2]), S.ground.lowest(B[:, :2])
             gap = np.maximum(np.abs(A[:, 2] - za), np.abs(B[:, 2] - zb))
-            cand = np.flatnonzero(on_ground & np.isfinite(gap) & (gap >= STEP_M - 1e-6) &
+            # (the same level only: an edge LEVEL_M or more off the terrain is another road's mesh, one passing over the ground road
+            # or under it, not a step of the ribbon against its ground)
+            cand = np.flatnonzero(on_ground & np.isfinite(gap) & (gap >= STEP_M - 1e-6) & (gap < LEVEL_M) &
                                   np.array([inside(q) for q in mid]))
-            # (an edge of a road mesh lying on a deck over the ground stretch is the deck's road, not the ground's)
+            # (an edge of a road mesh with an end lying on a deck over the ground stretch is the deck's road, not the ground's)
             for e in cand:
                 rest = [_near_hit(S.deck, P[None], np.array([zz]))[0] for P, zz in ((A[e, :2], A[e, 2]), (B[e, :2], B[e, 2]))]
-                if all(np.isfinite(v) and abs(v - zz) < STEP_M - 1e-6 for v, zz in zip(rest, (A[e, 2], B[e, 2]))):
+                if any(np.isfinite(v) and abs(v - zz) < STEP_M - 1e-6 for v, zz in zip(rest, (A[e, 2], B[e, 2]))):
                     continue
                 w = 0 if abs(A[e, 2] - za[e]) >= abs(B[e, 2] - zb[e]) else 1
                 P, zt = (A, za) if w == 0 else (B, zb)

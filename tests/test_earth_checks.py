@@ -359,6 +359,14 @@ def test_a_road_ribbon_wound_as_earths_are_edge_0_1_m_off_the_terrain_is_a_step_
             assert {s["kind"] for s in steps} == {"ground"} and ck.count_steps(steps) == 132.0
 
 
+def test_a_road_mesh_2_m_or_more_off_the_terrain_is_another_level_not_a_ribbon_step():
+    # (a road passing over the ground road, or under it: its edge is not the ribbon's against its ground)
+    for dz, counted in ((1.9, True), (2.0, False), (-2.5, False)):
+        tris, cls = road_scene(FLAT, roads=[plate(-30.0, 30.0, -3.0, 3.0, dz)[:, ::-1]])
+        steps = ck.road_checks(tris, cls, ROAD, CLASSES)["steps"]
+        assert (ck.count_steps(steps) > 0) == counted, dz
+
+
 def test_a_steep_road_whose_segments_touch_the_terrain_counts_nothing():
     steep = lambda x, y: 0.5 * x      # noqa: E731
     xs = [-30.0, -10.0, 10.0, 30.0]
