@@ -784,12 +784,21 @@ def road_checks(tris, cls, lines, classes, box=None):
                 on_ground |= m
             za, zb = S.ground.lowest(A[:, :2]), S.ground.lowest(B[:, :2])
             gap = np.maximum(np.abs(A[:, 2] - za), np.abs(B[:, 2] - zb))
-            # (the same level only: an edge LEVEL_M or more off the terrain is another road's mesh, one passing over the ground road
-            # or under it, not a step of the ribbon against its ground)
-            cand = np.flatnonzero(on_ground & np.isfinite(gap) & (gap >= STEP_M - 1e-6) & (gap < LEVEL_M) &
-                                  np.array([inside(q) for q in mid]))
-            # (an edge of a road mesh with an end lying on a deck over the ground stretch is the deck's road, not the ground's)
+            # (whose edge it is comes from the map's lines, never from how far it is off the terrain: a ground road's own ribbon is
+            # compared at any gap, a wall or a cliff included)
+            cand = np.flatnonzero(on_ground & np.isfinite(gap) & (gap >= STEP_M - 1e-6) & np.array([inside(q) for q in mid]))
             for e in cand:
+                # (an edge of a road mesh on a deck, within its slab under the top, or over one, inside the corridor of a bridge, is the bridge's road passing over the
+                # ground road, or its ramp: not the ground's; one under the deck is the ground road's own, passing under it)
+                pi, zd, _t = S.deck.at(mid[e][None])
+                zm = (A[e, 2] + B[e, 2]) / 2
+                if any(S.in_corridor(mid[e][None], j, "bridge")[0] for j in range(len(S.roads))) and len(zd)                         and (zm >= zd - SLAB_M).any():
+                    continue
+                # (the same in a tunnel: a road mesh under the terrain inside the corridor of a long tunnel, over its tube, is the tunnel's)
+                zg = (za[e] + zb[e]) / 2
+                if len(S.tunnel.at(mid[e][None])[1]) and zm < zg and                         any(S.in_corridor(mid[e][None], j, "tunnel")[0] for j in range(len(S.roads))):
+                    continue
+                # (an edge of a road mesh with an end lying on a deck over the ground stretch is the deck's road, not the ground's)
                 rest = [_near_hit(S.deck, P[None], np.array([zz]))[0] for P, zz in ((A[e, :2], A[e, 2]), (B[e, :2], B[e, 2]))]
                 if any(np.isfinite(v) and abs(v - zz) < STEP_M - 1e-6 for v, zz in zip(rest, (A[e, 2], B[e, 2]))):
                     continue
