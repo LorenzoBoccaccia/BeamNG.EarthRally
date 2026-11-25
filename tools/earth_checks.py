@@ -39,6 +39,9 @@ STEP_M = 0.1                # m: a gap in z where two surfaces should touch (a r
                             # be none (not BODY_BASE_M: the clearance of a body is not the smoothness of a road)
 SAMPLE_M = 1.0              # m between the samples across a ground road's end
 END_SEEK_M = 10.0           # m either side of the end the map's line puts there the mesh's end edge is looked for
+LEVEL_M = 2.0               # m: a deck or tube is the same level as an end if it lies within this of it at the same xy (a road passing
+                            # over or under it is 4 m or more off); a gap of this or more is another level, not a step
+SLAB_M = 1.5                # m: a deck's underside lies this near under its top at most (a deck stacked over another is farther)
 NODE_TOL_M = 0.05           # m: a line's end is the OSM node whose connector lies this near it (Overture's lie on the ends)
 
 
@@ -446,6 +449,8 @@ class Tops:
     def boundary(self):
         """(A (e, 3), B (e, 3), triangle (e,)): the edges used by one triangle alone (the mesh's boundary: a deck's ends and sides,
         and a gap in z between two meshes that touch in plan, their corners being welded in z too), with their triangle."""
+        if hasattr(self, "_bnd"):
+            return self._bnd
         self._weld()
         n = len(self.t)
         if not n:
@@ -455,7 +460,29 @@ class Tops:
         lo, hi = e.min(axis=1), e.max(axis=1)
         _u, inv, cnt = np.unique(lo * self.nv + hi, return_inverse=True, return_counts=True)
         b = (cnt[inv] == 1) & (lo != hi)
-        return c[b, 0], c[b, 1], np.repeat(np.arange(n), 3)[b]
+        self._bnd = (c[b, 0], c[b, 1], np.repeat(np.arange(n), 3)[b])
+        return self._bnd
+
+    def components(self):
+        """(n,) the connected piece each triangle belongs to: triangles sharing a corner (welded at 1 mm) are one piece, so a deck
+        and the deck passing over it are two."""
+        if hasattr(self, "_comp"):
+            return self._comp
+        self._weld()
+        n = len(self.t)
+        lab = np.arange(n)
+        if n:
+            flat = self.vid.ravel()
+            while True:
+                vm = np.full(self.nv, n, np.int64)
+                np.minimum.at(vm, flat, np.repeat(lab, 3))
+                new = np.minimum(lab, vm[self.vid].min(axis=1))
+                new = new[new]
+                if (new == lab).all():
+                    break
+                lab = new
+        self._comp = lab
+        return lab
 
     def vertex_triangles(self, P, Z):
         """[set of triangle indices] per vertex (P (k, 2), Z (k,)): the triangles that have a corner there."""
@@ -572,10 +599,11 @@ class _Scene:
         return [j for j in range(len(self.roads)) if j != k and len(self.bounds[j])
                 and np.hypot(*(self.bounds[j] - P0).T).min() <= width]
 
-    def surface(self, P, j, zref, ground_as=None, excl=None):
+    def surface(self, P, j, zref, ground_as=None, excl=None, level=None):
         """[(height, level)] per point of P (n, 2) of the road j's own surface there, by the map's level of its stretch under the
         point: the terrain in its ground corridor, the deck (of those under the point the nearest to zref (n,)) in its bridge's,
-        the tube's floor in its tunnel's; NaN where it has none. excl: per point the deck triangles that do not count. ground_as (n,): the terrain's height is this instead (ground
+        the tube's floor in its tunnel's; NaN where it has none. excl: per point the deck triangles that do not count. level: the
+        deck counts only within this of zref (the same level: not one passing over or under). ground_as (n,): the terrain's height is this instead (ground
         meeting ground is one surface: continuous by its making)."""
         n = len(P)
         out = np.full(n, np.nan)
@@ -587,21 +615,21 @@ class _Scene:
         out[m] = zt[m]
         m = self.in_corridor(P, j, "bridge")
         if m.any():
-            zd = _near_hit(self.deck, P, zref, excl)
+            zd = _near_hit(self.deck, P, zref, excl, level)
             m &= np.isfinite(zd)        # (a corridor is round at its ends: a point just past a bridge's has no deck)
             out[m] = zd[m]
         return out
 
 
-def _near_hit(tops, P, zref, excl=None):
+def _near_hit(tops, P, zref, excl=None, level=None):
     """(n,) the height of the triangle of tops under each point of P (n, 2) nearest zref (n,), NaN where none; excl: per point the
-    triangle indices that do not count (the ones the point is a corner of)."""
+    triangle indices that do not count (the ones the point is a corner of); level: only those within this of zref count."""
     pi, z, ti = tops.at(P)
     out, best = np.full(len(P), np.nan), np.full(len(P), np.inf)
     for a, b, t in zip(pi, z, ti):
         if excl is not None and t in excl[a]:
             continue
-        if abs(b - zref[a]) < best[a]:
+        if abs(b - zref[a]) < best[a] and (level is None or abs(b - zref[a]) < level):
             best[a], out[a] = abs(b - zref[a]), b
     return out
 
@@ -612,6 +640,71 @@ def _gap(z, cands):
     if not len(cands):
         return np.full(len(z), np.inf)
     return np.where(np.isfinite(cands), np.abs(cands - z[None]), np.inf).min(axis=0)
+
+
+def _own_pieces(tops, r, span):
+    """[(triangle indices of tops, those of the undersides under them)]: the pieces of tops (Tops.components) the line r runs along over its stretch span
+    (f0, f1): those under all (0.8 of the most) of the samples of its centre line. Two or more where decks are stacked on it:
+    which of them is the line's is for what continues its end to say; not a slab's underside, which lies under its top."""
+    lab = tops.components()
+    a, b = span[0] * r["length"], span[1] * r["length"]
+    s = np.arange(a + 0.5, b - 0.4, 2.0)
+    if not len(s):
+        s = np.array([(a + b) / 2])
+    pi, z, ti = tops.at(_pose(r["xy"], r["cum"], s)[0])
+    if not len(ti):
+        return []
+    zs = {}
+    for p_, z_, t_ in zip(pi.tolist(), z.tolist(), ti.tolist()):
+        key = (p_, int(lab[t_]))
+        zs[key] = max(zs.get(key, -math.inf), z_)
+    cnt = {}
+    for (_p, c) in zs:
+        cnt[c] = cnt.get(c, 0) + 1
+    top = max(cnt.values())
+    keep = [c for c, v in sorted(cnt.items()) if v >= 0.8 * top]
+    # (a piece lying within a slab's thickness under a piece of the line, anywhere along it, is its underside, not a surface to
+    # drive on; nor does it continue the end)
+    under = {c for (p_, c), z_ in zs.items() if any(0.0 < zs[(p_, c2)] - z_ < SLAB_M for c2 in keep if (p_, c2) in zs)}
+    gone = np.flatnonzero(np.isin(lab, list(under)))
+    return [(np.flatnonzero(lab == c), gone) for c in keep if c not in under]
+
+
+def _end_edges(tops, own, P0, tg, half):
+    """[(p xy, p xy, z, z, width)]: samples (SAMPLE_M apart, each standing for its width) along the end edge of the piece own
+    (triangle indices of tops) of a bridge or tube end at P0 (unit tangent tg out of the structure): the piece's boundary edges
+    across the road within END_SEEK_M of P0, facing out, cut to the carriageway's width (half either side of the line: not the
+    edge's tips beyond it), and only where they are the piece's driving surface, not an underside or a side under it."""
+    A, B, ti = tops.boundary()
+    k = np.isin(ti, own)
+    A, B, ti = A[k], B[k], ti[k]
+    if not len(A):
+        return []
+    nrm = np.array([-tg[1], tg[0]])
+    mid, d = (A + B) / 2, B[:, :2] - A[:, :2]
+    cen = tops.t[ti].mean(axis=1)[:, :2]
+    ok = (np.abs((mid[:, :2] - P0) @ tg) <= END_SEEK_M) & (np.abs(d @ tg) < np.abs(d @ nrm)) & (((cen - mid[:, :2]) @ tg) < 0)
+    top = Tops(tops.t[own])
+    out = []
+    for e in np.flatnonzero(ok):
+        la, lb = (A[e, :2] - P0) @ nrm, (B[e, :2] - P0) @ nrm
+        if abs(lb - la) < 1e-9:
+            t0, t1 = (0.0, 1.0) if abs(la) <= half else (1.0, 0.0)
+        else:
+            ta, tb = (-half - la) / (lb - la), (half - la) / (lb - la)
+            t0, t1 = max(0.0, min(ta, tb)), min(1.0, max(ta, tb))
+        if t1 - t0 <= 1e-6:
+            continue
+        a, b = A[e] + t0 * (B[e] - A[e]), A[e] + t1 * (B[e] - A[e])
+        m = max(int(math.ceil(np.hypot(*(b[:2] - a[:2])) / SAMPLE_M)), 1)
+        u = ((np.arange(m) + 0.5) / m)[:, None]
+        Q = a[None] + u * (b - a)[None]
+        pi, z, _t = top.at(Q[:, :2])
+        hi = np.full(m, -np.inf)
+        np.maximum.at(hi, pi, z)
+        w = float(np.hypot(*(b[:2] - a[:2]))) / m
+        out += [(Q[i, :2], Q[i, :2], Q[i, 2], Q[i, 2], w) for i in range(m) if Q[i, 2] >= hi[i] - 0.02]
+    return out
 
 
 def road_checks(tris, cls, lines, classes, box=None):
@@ -627,8 +720,9 @@ def road_checks(tris, cls, lines, classes, box=None):
     (the road mesh's boundary edges lying in a ground road's corridor, not resting on a deck) against the terrain at the same xy
     (z_beyond), or the end edge of a bridge's deck or a long tunnel's tube against the surface that continues it there.
     An end {x, y, z, width, kind, what, line, node}: of a bridge, a long tunnel or a ground road's line. Its edge's vertices (a
-    deck's or a tube's end edge in its mesh: the mesh's boundary edges across the road within END_SEEK_M of where the line
-    ends, facing out; a ground road's: samples across its width on the terrain) are compared with the surface of a road that
+    deck's or a tube's end edge in its mesh: the boundary edges across the road within END_SEEK_M of where the line ends,
+    facing out, of the line's own piece of the mesh (not a deck passing over it, nor a slab's underside), sampled across the
+    carriageway's width at its driving surface; a ground road's: samples across its width on the terrain) are compared with the surface of a road that
     goes on from it (the same road's next stretch, or a road with an end there: _Scene.continuing), at the same xy: kind
     "joined" (none of its vertices has a gap), "broken" (a vertex has a gap, no surface that continuing within STEP_M),
     "missing" (nothing continues it at any vertex, and its OSM node is another drivable line's end too) or "dead" (nothing
@@ -682,19 +776,44 @@ def road_checks(tris, cls, lines, classes, box=None):
         cand = []
         for a, b, kd in r["st"]:
             if not any(abs(b2 - a) < 1e-9 for _a2, b2, _k2 in r["st"]):
-                cand.append((a, -1.0, kd))
+                cand.append((a, -1.0, kd, (a, b)))
             if not any(abs(a2 - b) < 1e-9 for a2, _b2, _k2 in r["st"]):
-                cand.append((b, 1.0, kd))
+                cand.append((b, 1.0, kd, (a, b)))
         if r["ground"] and r["ground"][0][0] < 1e-9:
-            cand.append((0.0, -1.0, "ground"))
+            cand.append((0.0, -1.0, "ground", None))
         if r["ground"] and r["ground"][-1][1] > 1.0 - 1e-9:
-            cand.append((1.0, 1.0, "ground"))
-        for f, sign, kd in cand:
+            cand.append((1.0, 1.0, "ground", None))
+        for f, sign, kd, span in cand:
             p, t = _pose(r["xy"], r["cum"], np.array([f * r["length"]]))
             P0, tg = p[0], t[0] * sign
             if not inside(P0):
                 continue
             nrm = np.array([-tg[1], tg[0]])
+
+            def judge(edges, own):
+                """The edge's vertices against what continues the end at the same xy: the roads with an end within its width, and the
+                line's own next stretch if it is ground. own: the triangles of the structure's own piece (they never continue it)."""
+                Pv = np.array([q for e in edges for q in (e[0], e[1])])
+                Zv = np.array([q for e in edges for q in (e[2], e[3])])
+                ex = None if own is None else [own] * len(Pv)
+                if own is not None:
+                    # (a piece under the structure's own surface a metre inside its end is its underside: it never continues it)
+                    T = S.deck if kd == "bridge" else S.tunnel
+                    lab = T.components()
+                    pi, z, ti = T.at(Pv - tg[None])
+                    zt = np.full(len(Pv), -np.inf)
+                    mine = np.array([t in own for t in ti.tolist()], bool)
+                    np.maximum.at(zt, pi[mine], z[mine])
+                    ex = [set(own) for _ in Pv]
+                    for a_, z_, t_ in zip(pi.tolist(), z.tolist(), ti.tolist()):
+                        if 0.0 < zt[a_] - z_ < SLAB_M and t_ not in own:
+                            ex[a_] |= set(np.flatnonzero(lab == lab[t_]).tolist())
+                cs = [S.surface(Pv, j, Zv, Zv if kd == "ground" else None, ex, LEVEL_M) for j in S.continuing(k, P0, r["half"])]
+                if kd != "ground" and any(abs((g0 if sign > 0 else g1) - f) < 1e-9 for g0, g1 in r["ground"]):
+                    cs.append(S.surface(Pv, k, Zv, None, ex, LEVEL_M))
+                cands = np.array(cs) if cs else np.full((0, len(Pv)), np.nan)
+                return Pv, Zv, cands, _gap(Zv, cands)
+
             if kd == "ground":
                 off, wt, _n = _lateral(tg, r["half"])
                 V = P0[None] + off[:, None] * nrm[None]
@@ -702,32 +821,24 @@ def road_checks(tris, cls, lines, classes, box=None):
                 keep = np.isfinite(zv)
                 V, zv, wk = V[keep], zv[keep], wt[keep]
                 edges = [(V[i], V[i], zv[i], zv[i], float(wk[i])) for i in range(len(V))]
+                if not edges:
+                    continue
+                Pv, Zv, cands, gap = judge(edges, None)
             else:
                 tops = S.deck if kd == "bridge" else S.tunnel
-                A, B, ti = tops.boundary()
-                edges = []
-                if len(A):
-                    mid, d = (A + B) / 2, B[:, :2] - A[:, :2]
-                    ln = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
-                    along = (mid[:, :2] - P0) @ tg
-                    lat = (mid[:, :2] - P0) @ nrm
-                    cen = tops.t[ti].mean(axis=1)[:, :2]
-                    ok = ((np.abs(along) <= END_SEEK_M) & (np.abs(lat) <= r["half"]) & (np.abs(d @ tg) < np.abs(d @ nrm)) &
-                          (((cen - mid[:, :2]) @ tg) < 0))      # (across the road, the mesh behind it: it faces out)
-                    for e in np.flatnonzero(ok):
-                        edges.append((A[e, :2], B[e, :2], A[e, 2], B[e, 2], float(ln[e])))
-            if not edges:
-                continue
-            # what continues the end at the same xy: the roads with an end within its width, and the line's own next stretch
-            # if it is ground; each of the edge's two vertices against it
-            Pv = np.array([q for e in edges for q in (e[0], e[1])])
-            Zv = np.array([q for e in edges for q in (e[2], e[3])])
-            ex = None if kd == "ground" else (S.deck if kd == "bridge" else S.tunnel).vertex_triangles(Pv, Zv)
-            cs = [S.surface(Pv, j, Zv, Zv if kd == "ground" else None, ex) for j in S.continuing(k, P0, r["half"])]
-            if kd != "ground" and any(abs((g0 if sign > 0 else g1) - f) < 1e-9 for g0, g1 in r["ground"]):
-                cs.append(S.surface(Pv, k, Zv, None, ex))
-            cands = np.array(cs) if cs else np.full((0, len(Pv)), np.nan)
-            gap = _gap(Zv, cands)
+                best = None
+                for idx, under in _own_pieces(tops, r, span):
+                    edges = _end_edges(tops, idx, P0, tg, r["half"])
+                    if not edges:
+                        continue
+                    res = judge(edges, set(idx.tolist()) | set(under.tolist()))
+                    g = res[3][np.isfinite(res[3])]
+                    score = (float(np.median(g)) if len(g) else math.inf, float(res[1].mean()))
+                    if best is None or score < best[0]:
+                        best = (score, edges, res)
+                if best is None:
+                    continue
+                _sc, edges, (Pv, Zv, cands, gap) = best
             have = np.isfinite(gap)
             bad = have & (gap >= STEP_M - 1e-6)
             if kd != "ground":

@@ -400,3 +400,32 @@ def test_decks_end_to_end_with_a_gap_in_z_are_a_broken_join_with_no_node_ids_at_
     for z2, broken in ((3.3, 2), (3.0, 0)):
         tris, cls = road_scene(FLAT, [plate(-4.0, 4.0, -20.0, 0.0, 3.0), plate(-4.0, 4.0, 0.0, 20.0, z2)])
         assert ck.count_ends(ck.road_checks(tris, cls, lines, CLASSES)["ends"], "broken") == broken
+
+
+def _bridge_ends(deck_z, extra_decks=(), extra_lines=(), approach_z=3.0):
+    """A bridge along x between x -20 and 20 (line 'br', 4 m either side), its approaches at approach_z, the terrain a trench under
+    it; its deck's top at deck_z, extra_decks (plates) and extra_lines with it."""
+    terrain = heightfield([-80.0, -20.0, -19.99, 19.99, 20.0, 80.0], [-40.0, 40.0], lambda x, y: approach_z if abs(x) > 19.995 else 0.0)
+    tris, cls = road_scene(terrain, [plate(-20.0, 20.0, -3.9, 3.9, deck_z)] + list(extra_decks))
+    return ck.road_checks(tris, cls, lines_of(line([(-60, 0), (60, 0)], [(1 / 3, 2 / 3, "bridge")], 4.0, "br"), *extra_lines), CLASSES)
+
+
+def test_a_viaduct_passing_over_a_bridges_end_is_not_what_continues_it():
+    # (its own end hangs over the bridge's: the nearest deck at the bridge's end vertices is the viaduct's, 6 m over it)
+    over = [plate(18.0, 60.0, -3.9, 3.9, 9.0)]
+    rc = _bridge_ends(3.0, over, [line([(18, 0), (60, 0)], [(0.0, 1.0, "bridge")], 4.0, "via")])
+    assert [s for s in rc["steps"] if s["line"] == "br"] == []
+    assert [e["kind"] for e in rc["ends"] if e["line"] == "br" and e["what"] == "bridge"] == ["joined", "joined"]
+
+
+def test_a_slab_whose_underside_is_below_the_approach_and_whose_top_is_flush_with_it_counts_nothing():
+    # (the underside, an up-facing plate 0.5 m under the top: the driving surface is the top)
+    rc = _bridge_ends(3.0, [plate(-20.0, 20.0, -3.9, 3.9, 2.5)])
+    assert rc["steps"] == [] and ck.count_ends(rc["ends"], "broken") == 0
+
+
+def test_a_deck_ending_0_5_m_below_its_approach_counts():
+    rc = _bridge_ends(2.5)
+    assert ck.count_ends(rc["ends"], "broken") == 2
+    assert {s["kind"] for s in rc["steps"]} == {"bridge"} and ck.count_steps(rc["steps"]) == 15.6
+    assert {round(abs(s["z_edge"] - s["z_beyond"]), 2) for s in rc["steps"]} == {0.5}
