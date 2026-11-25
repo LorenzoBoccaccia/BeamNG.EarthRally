@@ -359,12 +359,30 @@ def test_a_road_ribbon_wound_as_earths_are_edge_0_1_m_off_the_terrain_is_a_step_
             assert {s["kind"] for s in steps} == {"ground"} and ck.count_steps(steps) == 132.0
 
 
-def test_a_road_mesh_2_m_or_more_off_the_terrain_is_another_level_not_a_ribbon_step():
-    # (a road passing over the ground road, or under it: its edge is not the ribbon's against its ground)
-    for dz, counted in ((1.9, True), (2.0, False), (-2.5, False)):
-        tris, cls = road_scene(FLAT, roads=[plate(-30.0, 30.0, -3.0, 3.0, dz)[:, ::-1]])
-        steps = ck.road_checks(tris, cls, ROAD, CLASSES)["steps"]
-        assert (ck.count_steps(steps) > 0) == counted, dz
+def test_a_ground_roads_own_ribbon_3_m_above_its_terrain_counts_whatever_the_gap():
+    # (a wall or a cliff beside the road: its own ribbon's edge against the ground, at any gap)
+    tris, cls = road_scene(FLAT, roads=[plate(-30.0, 30.0, -3.0, 3.0, 3.0)[:, ::-1]])
+    steps = ck.road_checks(tris, cls, ROAD, CLASSES)["steps"]
+    assert {s["kind"] for s in steps} == {"ground"} and ck.count_steps(steps) == 132.0
+    assert {round(s["z_edge"] - s["z_beyond"], 2) for s in steps} == {3.0}
+
+
+def _crossing(deck_z, with_deck=True):
+    """The ground road (along x at y 0) and a road crossing over it along y on a bridge (line 'x', its deck at deck_z, its road mesh
+    on it, wound as Earth's)."""
+    ribbon = plate(-3.0, 3.0, -20.0, 20.0, deck_z)[:, ::-1]
+    decks = [plate(-3.2, 3.2, -20.0, 20.0, deck_z - 0.3)[:, ::-1]] if with_deck else []
+    tris, cls = road_scene(FLAT, decks, [ribbon])
+    ls = [line([(-30, 0), (30, 0)])]
+    if with_deck:
+        ls.append(line([(0, -20), (0, 20)], [(0.0, 1.0, "bridge")], 4.0, "x"))
+    return ck.road_checks(tris, cls, lines_of(*ls), CLASSES)["steps"]
+
+
+def test_a_deck_road_crossing_over_a_ground_road_is_not_its_ribbon_but_the_same_mesh_without_a_deck_is():
+    assert _crossing(5.0) == []
+    assert _crossing(7.0) == []
+    assert ck.count_steps(_crossing(5.0, with_deck=False)) > 0
 
 
 def test_a_steep_road_whose_segments_touch_the_terrain_counts_nothing():
