@@ -9,14 +9,13 @@ from Earth's grading, nor from where the viewer put things):
                     a tube through the road over it. A surface resting on another (a track on its deck, a deck's end on its
                     embankment) is no penetration: within REST_M of it.
 
-  road_steps        along the edges of every drivable surface (a ground road's corridor against the ground beside it; a deck's and a
-                    long tunnel's ends against what goes on from them: not a deck's sides over open air), where the height beyond
-                    the edge jumps STEP_M or more from what the surface's own slope carries on: a wall a road drops into, a cliff
-                    beside it, a deck ending over the ground. Counted in metres of edge.
-  road_ends         at every end of every drivable surface (a deck's, a long tunnel's, a ground road's), whether the surface of a
-                    road that goes on from it (one with an end there, or the same road's next stretch) lies beyond it: one that
-                    does at another height than STEP_M is a broken join; where none does and the raw OSM node of the end is
-                    shared with another drivable line, a missing join (a node used by one line is a dead end: fine).
+  road_steps        a gap in z, STEP_M or more, where two surfaces should touch, along an edge: a ground road's ribbon (its road
+                    mesh's boundary edges in the road's corridor) against the terrain at the same xy, a deck's or a long tunnel's
+                    end edge against the surface that continues it. Not a deck's sides over open air. Counted in metres of edge.
+  road_ends         at every end of every drivable surface (a deck's, a long tunnel's, a ground road's): its edge's vertices
+                    against the surface of a road that goes on from it (one with an end there, or the same road's next stretch)
+                    at the same xy: a gap of STEP_M or more is a broken join; where nothing continues it and the raw OSM node of
+                    the end is shared with another drivable line, a missing join (a node used by one line is a dead end: fine).
                     Only surfaces meant to be continuous at one level are compared, by the map's own levels (ground, bridge,
                     tunnel): a deck over or under another road is neither a step nor a join.
 
@@ -35,13 +34,11 @@ EDGE_EPS_M = 0.02           # m from its ends an edge must cross a triangle (an 
 CROSS_NEAR_M = 12.0         # m round a crossing of the map's lines its meshes are compared
 GROUND_CORRIDOR_M = 4.0     # m each side of a ground road's line its ground is that road's surface (Earth paints it there)
 SHORT_TUNNEL_M = 60.0       # m: a tunnel this short is opened by Earth (gradesep): its road is painted on the ground
-STEP_M = 0.1                # m: a road's surface may not jump this much anywhere: 0.1 m is already a discontinuity that can ruin a
-                            # driver's day, and there should be none (not BODY_BASE_M: the clearance of a body is not the
-                            # smoothness of a road)
-STEP_REACH_M = 1.0          # m beyond an edge or an end what is there is read: the terrain lattice's step (a step is a change
-                            # within one cell); also the m of edge a sample stands for
-MARCH_M = 0.25              # m between the probes of the march that finds a deck's or a tube's end in its mesh
-END_SEEK_M = 10.0           # m either side of the end the map's line puts there the mesh's end is looked for
+STEP_M = 0.1                # m: a gap in z where two surfaces should touch (a road's edge and the terrain, a deck's end and what
+                            # continues it): 0.1 m is already a discontinuity that can ruin a driver's day, and there should
+                            # be none (not BODY_BASE_M: the clearance of a body is not the smoothness of a road)
+SAMPLE_M = 1.0              # m between the samples across a ground road's end
+END_SEEK_M = 10.0           # m either side of the end the map's line puts there the mesh's end edge is looked for
 NODE_TOL_M = 0.05           # m: a line's end is the OSM node whose connector lies this near it (Overture's lie on the ends)
 
 
@@ -435,6 +432,41 @@ class Tops:
         z = a[:, 2] + l1 * (b[:, 2] - a[:, 2]) + l2 * (d[:, 2] - a[:, 2])
         return pi[hit], z[hit], ti[hit]
 
+    def _weld(self):
+        """The triangles' corners welded at 1 mm: ids (n, 3), and the triangles by corner id."""
+        if hasattr(self, "vid"):
+            return
+        key = np.round(self.t.reshape(-1, 3) / 1e-3).astype(np.int64)
+        u, inv = np.unique(key, axis=0, return_inverse=True) if len(key) else (np.zeros((0, 3), np.int64), np.zeros(0, np.int64))
+        self.vid, self.nv = inv.reshape(-1, 3), len(u)
+        self.vmap = {tuple(k): i for i, k in enumerate(u.tolist())}
+        o = np.argsort(self.vid.ravel(), kind="stable")
+        self.vtri, self.vsorted = o // 3, self.vid.ravel()[o]
+
+    def boundary(self):
+        """(A (e, 3), B (e, 3), triangle (e,)): the edges used by one triangle alone (the mesh's boundary: a deck's ends and sides,
+        and a gap in z between two meshes that touch in plan, their corners being welded in z too), with their triangle."""
+        self._weld()
+        n = len(self.t)
+        if not n:
+            return np.zeros((0, 3)), np.zeros((0, 3)), np.zeros(0, np.int64)
+        e = np.stack([self.vid[:, [0, 1]], self.vid[:, [1, 2]], self.vid[:, [2, 0]]], axis=1).reshape(-1, 2)
+        c = np.stack([self.t[:, [0, 1]], self.t[:, [1, 2]], self.t[:, [2, 0]]], axis=1).reshape(-1, 2, 3)
+        lo, hi = e.min(axis=1), e.max(axis=1)
+        _u, inv, cnt = np.unique(lo * self.nv + hi, return_inverse=True, return_counts=True)
+        b = (cnt[inv] == 1) & (lo != hi)
+        return c[b, 0], c[b, 1], np.repeat(np.arange(n), 3)[b]
+
+    def vertex_triangles(self, P, Z):
+        """[set of triangle indices] per vertex (P (k, 2), Z (k,)): the triangles that have a corner there."""
+        self._weld()
+        out = []
+        for p, z in zip(P, Z):
+            v = self.vmap.get(tuple(np.round(np.array([p[0], p[1], z]) / 1e-3).astype(np.int64).tolist()))
+            out.append(set() if v is None else set(self.vtri[np.searchsorted(self.vsorted, v, "left"):
+                                                              np.searchsorted(self.vsorted, v, "right")].tolist()))
+        return out
+
     def lowest(self, P):
         """(k,) the lowest height of what each point of P stands on, NaN where nothing does (the terrain: its one surface; a
         tube: its floor, not its roof)."""
@@ -493,8 +525,8 @@ def _road_lines(lines):
 
 def _lateral(t, half):
     """(offsets (m,), weights (m,), normal (2,)): samples across a width of 2 half along a road whose unit tangent is t, each
-    standing for about STEP_REACH_M of it."""
-    m = max(int(math.ceil(2 * half / STEP_REACH_M)), 1)
+    standing for about SAMPLE_M of it."""
+    m = max(int(math.ceil(2 * half / SAMPLE_M)), 1)
     w = 2 * half / m
     return -half + (np.arange(m) + 0.5) * w, np.full(m, w), np.array([-t[1], t[0]])
 
@@ -508,6 +540,7 @@ class _Scene:
         self.ground = Tops(tris[np.isin(cls, classes["ground"])])
         self.deck = Tops(tris[cls == classes["deck"]])
         self.tunnel = Tops(tris[cls == classes["tunnel"]])
+        self.road = Tops(tris[cls == classes["road"]] if "road" in classes else tris[:0])
         self.roads = _road_lines(lines)
         self.corridors = []     # per road: {level: [(a stretch's polyline (k, 2), its bounding box)]}, level "ground", "bridge", "tunnel"
         self.bounds = []        # per road: the points where its level can change or it ends: its ends and its stretches' ends
@@ -539,10 +572,10 @@ class _Scene:
         return [j for j in range(len(self.roads)) if j != k and len(self.bounds[j])
                 and np.hypot(*(self.bounds[j] - P0).T).min() <= width]
 
-    def surface(self, P, j, zref, ground_as=None):
+    def surface(self, P, j, zref, ground_as=None, excl=None):
         """[(height, level)] per point of P (n, 2) of the road j's own surface there, by the map's level of its stretch under the
         point: the terrain in its ground corridor, the deck (of those under the point the nearest to zref (n,)) in its bridge's,
-        the tube's floor in its tunnel's; NaN where it has none. ground_as (n,): the terrain's height is this instead (ground
+        the tube's floor in its tunnel's; NaN where it has none. excl: per point the deck triangles that do not count. ground_as (n,): the terrain's height is this instead (ground
         meeting ground is one surface: continuous by its making)."""
         n = len(P)
         out = np.full(n, np.nan)
@@ -554,130 +587,98 @@ class _Scene:
         out[m] = zt[m]
         m = self.in_corridor(P, j, "bridge")
         if m.any():
-            zd = _near_hit(self.deck, P, zref)
+            zd = _near_hit(self.deck, P, zref, excl)
             m &= np.isfinite(zd)        # (a corridor is round at its ends: a point just past a bridge's has no deck)
             out[m] = zd[m]
         return out
 
 
-def _deck_end(scene, kind, P0, t, half):
-    """[(position (2,), height, weight, tangent)] over the width at the end of a bridge (kind "bridge") or a long tunnel that the
-    map's line puts at P0 (outward unit tangent t): where the mesh's end lies there, found by marching along t from END_SEEK_M
-    inside to END_SEEK_M outside over each sample of the width, from the mesh nearest the line's end, on while it goes on within
-    STEP_M of where its own slope carries it (a gap of STEP_REACH_M is bridged): a jump of STEP_M ends it. A mesh that goes
-    on past the seek has no end there."""
-    tops = scene.deck if kind == "bridge" else scene.tunnel
-    off, wt, nrm = _lateral(t, half)
-    nd = int(round(2 * END_SEEK_M / MARCH_M)) + 1
-    d = -END_SEEK_M + np.arange(nd) * MARCH_M
-    P = P0[None, None] + off[:, None, None] * nrm[None, None] + d[None, :, None] * t[None, None]
-    pi, z, _ = tops.at(P.reshape(-1, 2))
-    cov = {}
-    for a, b in zip(pi, z):
-        cov.setdefault(int(a), []).append(float(b))
-    if kind != "bridge":
-        cov = {a: [min(v)] for a, v in cov.items()}
-    gap = int(round(STEP_REACH_M / MARCH_M))
-    k0, out = nd // 2, []
-    for j in range(len(off)):
-        def zs(k):
-            return cov.get(j * nd + k, [])
-        start = next((k for r in range(nd) for k in (k0 - r, k0 + r) if 0 <= k < nd and zs(k)), None)
-        if start is None:
-            continue
-        levels = []
-        for z0 in sorted(zs(start)):
-            if not levels or z0 - levels[-1] > MARCH_M:
-                levels.append(z0)
-        for z0 in levels:
-            k, zc = start, z0
-            back = [v for v in zs(start - 1) if abs(v - z0) <= MARCH_M]
-            slope = z0 - min(back, key=lambda v: abs(v - z0)) if back else 0.0         # (m per march step)
-            while k < nd - 1:
-                nxt = [(kk, abs(v - zc - (kk - k) * slope), v) for kk in range(k + 1, min(k + gap, nd - 1) + 1) for v in zs(kk)
-                       if abs(v - zc - (kk - k) * slope) < STEP_M - 1e-6]
-                if not nxt:
-                    break
-                kk, _dz, v = min(nxt, key=lambda q: (q[0], q[1]))
-                slope, k, zc = (v - zc) / (kk - k), kk, v
-            if k < nd - 1:
-                out.append((P0 + off[j] * nrm + d[k] * t, zc, float(wt[j]), t))
-    return out
-
-
-def _near_hit(tops, P, zref):
-    """(n,) the height of the triangle of tops under each point of P (n, 2) nearest zref (n,), NaN where none."""
-    pi, z, _ = tops.at(P)
+def _near_hit(tops, P, zref, excl=None):
+    """(n,) the height of the triangle of tops under each point of P (n, 2) nearest zref (n,), NaN where none; excl: per point the
+    triangle indices that do not count (the ones the point is a corner of)."""
+    pi, z, ti = tops.at(P)
     out, best = np.full(len(P), np.nan), np.full(len(P), np.inf)
-    for a, b in zip(pi, z):
+    for a, b, t in zip(pi, z, ti):
+        if excl is not None and t in excl[a]:
+            continue
         if abs(b - zref[a]) < best[a]:
             best[a], out[a] = abs(b - zref[a]), b
     return out
 
 
-def _kink(z_edge, z_beyond, z_inside):
-    """m a surface jumps across an edge: the height beyond it less the height its own slope carries on from inside it (a slope
-    is no step; the inside height is the edge's own where there is none)."""
-    zi = np.where(np.isfinite(z_inside), z_inside, z_edge)
-    return np.abs(z_beyond - (2 * z_edge - zi))
+def _gap(z, cands):
+    """(n,) the smallest vertical gap between each height z (n,) and the heights cands (c, n) of what continues it at the same
+    xy, inf where nothing does."""
+    if not len(cands):
+        return np.full(len(z), np.inf)
+    return np.where(np.isfinite(cands), np.abs(cands - z[None]), np.inf).min(axis=0)
 
 
 def road_checks(tris, cls, lines, classes, box=None):
     """{"steps": [...], "ends": [...]}: the road steps and the road ends of a scene (tris (n, 3, 3), cls their classes; classes:
-    {"ground": (ids,), "deck": id, "tunnel": id}, the viewer's) round the map's lines (earth_view.map_lines), those whose
-    sample or end lies in box (x0, y0, x1, y1) if given.
+    {"ground": (ids,), "deck": id, "tunnel": id, "road": id}, the viewer's) round the map's lines (earth_view.map_lines), those
+    whose edge or end lies in box (x0, y0, x1, y1) if given.
 
-    Only what is meant to be continuous at one level is compared: a ground road's edge with the ground beside it, an end with
-    the surface of a road that goes on from it (the same road's next stretch, or a road with an end there: _Scene.continuing),
-    at the level the map's lines give that stretch (ground, bridge, tunnel). A deck passing over or under another road is
-    neither a step nor a join, nor is the ground below a bridge's side.
+    The measure is one: a gap in z where two surfaces should touch, at the same xy, STEP_M or more. No slope is read, nothing
+    beyond an edge. Only what is meant to be continuous at one level is compared, by the map's own levels (ground, bridge,
+    tunnel): a deck passing over or under another road is neither a step nor a join, nor is a bridge's side.
 
-    A step {x, y, z_edge, z_beyond, m, kind, run, line}: m of a road's edge, a ground road's (its carriageway's width either side
-    of its line) or a bridge's or long tunnel's end (across its width; its sides are no edge), where the height beyond it
-    (STEP_REACH_M on) jumps STEP_M or more from what the surface's own slope carries on (_kink). The deck's end is found in its
-    mesh (_deck_end), the map's line says only where to look; the ground beside a bridge's end is the reference where the line
-    goes on as ground there.
-    An end {x, y, z, width, kind, what, line, node}: of a bridge, a long tunnel or a ground road's line, kind "joined" (a surface
-    of a road that goes on from it lies beyond it within STEP_M of its height), "broken" (such surfaces lie beyond it, none
-    that near), "missing" (none, and its OSM node is another drivable line's end too) or "dead" (none, its node is its alone:
-    a dead end). The map's graph is not read: only where lines are, how wide, which level, and which OSM node their ends are."""
+    A step {x, y, z_edge, z_beyond, m, kind, run, line}: m of an edge of a mesh with a gap: the edge of a ground road's ribbon
+    (the road mesh's boundary edges lying in a ground road's corridor, not resting on a deck) against the terrain at the same xy
+    (z_beyond), or the end edge of a bridge's deck or a long tunnel's tube against the surface that continues it there.
+    An end {x, y, z, width, kind, what, line, node}: of a bridge, a long tunnel or a ground road's line. Its edge's vertices (a
+    deck's or a tube's end edge in its mesh: the mesh's boundary edges across the road within END_SEEK_M of where the line
+    ends, facing out; a ground road's: samples across its width on the terrain) are compared with the surface of a road that
+    goes on from it (the same road's next stretch, or a road with an end there: _Scene.continuing), at the same xy: kind
+    "joined" (none of its vertices has a gap), "broken" (a vertex has a gap, no surface that continuing within STEP_M),
+    "missing" (nothing continues it at any vertex, and its OSM node is another drivable line's end too) or "dead" (nothing
+    does, its node is its alone: a dead end). The map's graph is not read: only where lines are, how wide, which level, and
+    which OSM node their ends are."""
     S = _Scene(tris, cls, lines, classes)
 
     def inside(p):
         return box is None or (box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3])
 
-    def add_steps(bad, pts, z_edge, z_beyond, w, kind, line, run):
-        cur = None
-        for i in range(len(bad)):
-            if bad[i]:
-                if cur is None:
-                    run, cur = run + 1, run + 1
-                steps.append(dict(x=float(pts[i][0]), y=float(pts[i][1]), z_edge=float(z_edge[i]), z_beyond=float(z_beyond[i]),
-                                  m=float(w[i]), kind=kind, run=cur, line=line))
-            else:
-                cur = None
-        return run
+    steps, ends, shared = [], [], {}
+    state = {"run": 0}
 
-    steps, ends, shared, run = [], [], {}, 0
+    def add_step(mid, z_edge, z_beyond, m, kind, line, new):
+        if new:
+            state["run"] += 1
+        steps.append(dict(x=float(mid[0]), y=float(mid[1]), z_edge=float(z_edge), z_beyond=float(z_beyond), m=float(m), kind=kind,
+                          run=state["run"], line=line))
+
     for k, r in enumerate(S.roads):
         for n in r["nodes"]:
             if n is not None:
                 shared.setdefault(n, set()).add(k)
+    # a ground road's ribbon: its boundary edges in the corridors of the roads' ground stretches against the terrain under them
+    rd = classes.get("road")
+    if rd is not None and S.roads:
+        T = S.road
+        A, B, ti = T.boundary()
+        if len(A):
+            mid = (A[:, :2] + B[:, :2]) / 2
+            on_ground = np.zeros(len(A), bool)
+            owner = np.full(len(A), -1)
+            for k in range(len(S.roads)):
+                m = S.in_corridor(mid, k, "ground") & (owner < 0)
+                owner[m] = k
+                on_ground |= m
+            za, zb = S.ground.lowest(A[:, :2]), S.ground.lowest(B[:, :2])
+            gap = np.maximum(np.abs(A[:, 2] - za), np.abs(B[:, 2] - zb))
+            cand = np.flatnonzero(on_ground & np.isfinite(gap) & (gap >= STEP_M - 1e-6) &
+                                  np.array([inside(q) for q in mid]))
+            # (an edge of a road mesh lying on a deck over the ground stretch is the deck's road, not the ground's)
+            for e in cand:
+                rest = [_near_hit(S.deck, P[None], np.array([zz]))[0] for P, zz in ((A[e, :2], A[e, 2]), (B[e, :2], B[e, 2]))]
+                if all(np.isfinite(v) and abs(v - zz) < STEP_M - 1e-6 for v, zz in zip(rest, (A[e, 2], B[e, 2]))):
+                    continue
+                w = 0 if abs(A[e, 2] - za[e]) >= abs(B[e, 2] - zb[e]) else 1
+                P, zt = (A, za) if w == 0 else (B, zb)
+                add_step(mid[e], P[e, 2], zt[e], np.hypot(*(B[e, :2] - A[e, :2])), "ground", S.roads[owner[e]]["id"], True)
+    # the ends: of each bridge and long tunnel, and of the line's own end where it lies on the ground
     for k, r in enumerate(S.roads):
-        # a ground road's edges: its carriageway's width either side of its line, against the ground beside it
-        for f0, f1 in r["ground"]:
-            s0, s1 = f0 * r["length"], f1 * r["length"]
-            n = max(int(math.ceil((s1 - s0) / STEP_REACH_M)), 1)
-            s = s0 + (np.arange(n) + 0.5) * ((s1 - s0) / n)
-            p, t = _pose(r["xy"], r["cum"], s)
-            nrm = np.stack([-t[:, 1], t[:, 0]], axis=1)
-            for side in (-1.0, 1.0):
-                e = p + side * r["half"] * nrm
-                ze, zb = S.ground.lowest(e), S.ground.lowest(p + side * (r["half"] + STEP_REACH_M) * nrm)
-                zi = S.ground.lowest(p + side * (r["half"] - STEP_REACH_M) * nrm)
-                bad = np.isfinite(ze) & np.isfinite(zb) & (_kink(ze, zb, zi) >= STEP_M - 1e-6) & np.array([inside(q) for q in e])
-                run = add_steps(bad, e, ze, zb, np.full(n, (s1 - s0) / n), "ground", r["id"], run)
-        # the ends: of each bridge and long tunnel, and of the line's own end where it lies on the ground
         cand = []
         for a, b, kd in r["st"]:
             if not any(abs(b2 - a) < 1e-9 for _a2, b2, _k2 in r["st"]):
@@ -693,48 +694,56 @@ def road_checks(tris, cls, lines, classes, box=None):
             P0, tg = p[0], t[0] * sign
             if not inside(P0):
                 continue
+            nrm = np.array([-tg[1], tg[0]])
             if kd == "ground":
-                off, wt, nrm = _lateral(tg, r["half"])
-                E = P0[None] + off[:, None] * nrm[None]
-                zl = S.ground.lowest(E)
-                prof = [(E[j], float(zl[j]), float(wt[j]), tg) for j in range(len(off)) if np.isfinite(zl[j])]
+                off, wt, _n = _lateral(tg, r["half"])
+                V = P0[None] + off[:, None] * nrm[None]
+                zv = S.ground.lowest(V)
+                keep = np.isfinite(zv)
+                V, zv, wk = V[keep], zv[keep], wt[keep]
+                edges = [(V[i], V[i], zv[i], zv[i], float(wk[i])) for i in range(len(V))]
             else:
-                prof = _deck_end(S, kd, P0, tg, r["half"])
-            if not prof:
+                tops = S.deck if kd == "bridge" else S.tunnel
+                A, B, ti = tops.boundary()
+                edges = []
+                if len(A):
+                    mid, d = (A + B) / 2, B[:, :2] - A[:, :2]
+                    ln = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
+                    along = (mid[:, :2] - P0) @ tg
+                    lat = (mid[:, :2] - P0) @ nrm
+                    cen = tops.t[ti].mean(axis=1)[:, :2]
+                    ok = ((np.abs(along) <= END_SEEK_M) & (np.abs(lat) <= r["half"]) & (np.abs(d @ tg) < np.abs(d @ nrm)) &
+                          (((cen - mid[:, :2]) @ tg) < 0))      # (across the road, the mesh behind it: it faces out)
+                    for e in np.flatnonzero(ok):
+                        edges.append((A[e, :2], B[e, :2], A[e, 2], B[e, 2], float(ln[e])))
+            if not edges:
                 continue
-            E = np.array([q[0] for q in prof])
-            ze = np.array([q[1] for q in prof])
-            wt = np.array([q[2] for q in prof])
-            tt = np.array([q[3] for q in prof])
-            B, A = E + STEP_REACH_M * tt, E - STEP_REACH_M * tt
-            # the height beyond the end its own surface's slope carries on to
-            zi = _near_hit(S.deck, A, ze) if kd == "bridge" else (S.tunnel if kd == "tunnel" else S.ground).lowest(A)
-            zexp = ze + (ze - np.where(np.isfinite(zi), zi, ze))
-            # what goes on from the end: the roads with an end within its width, and the line's own next stretch if it is ground
-            cands = [S.surface(B, j, zexp, zexp if kd == "ground" else None) for j in S.continuing(k, P0, r["half"])]
-            own_ground = kd != "ground" and any(abs((g0 if sign > 0 else g1) - f) < 1e-9 for g0, g1 in r["ground"])
-            if own_ground:
-                cands.append(S.surface(B, k, zexp))
-            cands = np.array(cands) if cands else np.full((0, len(E)), np.nan)
+            # what continues the end at the same xy: the roads with an end within its width, and the line's own next stretch
+            # if it is ground; each of the edge's two vertices against it
+            Pv = np.array([q for e in edges for q in (e[0], e[1])])
+            Zv = np.array([q for e in edges for q in (e[2], e[3])])
+            ex = None if kd == "ground" else (S.deck if kd == "bridge" else S.tunnel).vertex_triangles(Pv, Zv)
+            cs = [S.surface(Pv, j, Zv, Zv if kd == "ground" else None, ex) for j in S.continuing(k, P0, r["half"])]
+            if kd != "ground" and any(abs((g0 if sign > 0 else g1) - f) < 1e-9 for g0, g1 in r["ground"]):
+                cs.append(S.surface(Pv, k, Zv, None, ex))
+            cands = np.array(cs) if cs else np.full((0, len(Pv)), np.nan)
+            gap = _gap(Zv, cands)
+            have = np.isfinite(gap)
+            bad = have & (gap >= STEP_M - 1e-6)
             if kd != "ground":
-                # a step: the ground where the line goes on as ground, the surfaces of the roads that go on, off by STEP_M
-                zg = S.ground.lowest(B) if own_ground else np.full(len(E), np.nan)
-                ref = np.vstack([cands, zg[None]]) if len(cands) else zg[None]
-                have = np.isfinite(ref).any(axis=0)
-                dist = np.where(np.isfinite(ref), np.abs(ref - zexp[None]), np.inf).min(axis=0)
-                bad = have & (dist >= STEP_M - 1e-6)
-                near = np.take_along_axis(ref, np.where(np.isfinite(ref), np.abs(ref - zexp[None]), np.inf).argmin(axis=0)[None], 0)[0]
-                zb = np.where(np.isfinite(zg), zg, near)
-                run = add_steps(bad, E, ze, zb, wt, kd, r["id"], run)
-            touched = np.isfinite(cands).any(axis=0) if len(cands) else np.zeros(len(E), bool)
-            matched = bool((np.isfinite(cands) & (np.abs(cands - zexp[None]) < STEP_M - 1e-6)).any()) if len(cands) else False
-            how_broken = bool(touched.any())      # (touched, and none within STEP_M)
+                new = True
+                for i, e in enumerate(edges):
+                    if bad[2 * i] or bad[2 * i + 1]:
+                        w = 2 * i if (bad[2 * i] and (not bad[2 * i + 1] or gap[2 * i] >= gap[2 * i + 1])) else 2 * i + 1
+                        near = np.where(np.isfinite(cands[:, w]), np.abs(cands[:, w] - Zv[w]), np.inf).argmin() if len(cands) else 0
+                        add_step((Pv[2 * i] + Pv[2 * i + 1]) / 2, Zv[w], cands[near, w], e[4], kd, r["id"], new)
+                        new = False
             node = r["nodes"][0 if sign < 0 else 1] if f in (0.0, 1.0) else None
             other = node is not None and len(shared.get(node, ())) > 1
-            how = "joined" if matched else "broken" if how_broken else "missing" if other else "dead"
-            c = E.mean(axis=0)
-            ends.append(dict(x=float(c[0]), y=float(c[1]), z=float(ze.mean()), width=float(wt.sum()), kind=how, what=kd,
-                             line=r["id"], node=node))
+            how = "broken" if bad.any() else "joined" if have.any() else "missing" if other else "dead"
+            c = Pv.mean(axis=0)
+            ends.append(dict(x=float(c[0]), y=float(c[1]), z=float(Zv.mean()), width=float(sum(e[4] for e in edges)), kind=how,
+                             what=kd, line=r["id"], node=node))
     return {"steps": steps, "ends": ends}
 
 
