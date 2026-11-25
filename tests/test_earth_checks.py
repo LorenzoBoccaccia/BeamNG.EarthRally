@@ -303,3 +303,98 @@ def test_a_rail_tunnel_the_tree_does_not_draw_has_no_surface_to_cut():
     _hit, undrawn = ck.penetrations(tris, cls, lines, dict(CLASSES, rail_tunnels=False))
     assert ck.count_cut(drawn) == 1, "a drawn tube through the road's ground still cuts"
     assert ck.count_cut(undrawn) == 0
+
+
+# ---- road steps and road ends ---------------------------------------------------------------------------------------------
+def heightfield(xs, ys, f):
+    """Terrain triangles (n, 3, 3), classed GROUND, over the grid xs x ys at heights f(x, y) (two per cell, facing up)."""
+    T = []
+    for x0, x1 in zip(xs[:-1], xs[1:]):
+        for y0, y1 in zip(ys[:-1], ys[1:]):
+            a, b, c, d = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+            v = lambda p: (p[0], p[1], f(*p))      # noqa: E731
+            T += [(v(a), v(b), v(c)), (v(a), v(c), v(d))]
+    return np.array(T, np.float64)
+
+
+def plate(x0, x1, y0, y1, z):
+    """A deck's top: two triangles (2, 3, 3) facing up over the rectangle, at z."""
+    a, b, c, d = (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)
+    return np.array([(a, b, c), (a, c, d)], np.float64)
+
+
+def road_scene(terrain, decks=()):
+    tris = np.concatenate([terrain] + list(decks))
+    cls = np.concatenate([np.full(len(terrain), ev.GROUND, np.int8)] + [np.full(len(d), ev.DECK, np.int8) for d in decks])
+    return tris, cls
+
+
+def line(pts, ranges=(), half=3.0, rid="r"):
+    return np.array(pts, np.float64), list(ranges), half, rid
+
+
+def lines_of(*ls):
+    return {"road": [(xy, r) for xy, r, _h, _i in ls], "road_half": [h for *_a, h, _i in ls], "road_id": [i for *_a, i in ls]}
+
+
+def test_a_step_of_0_1_m_beside_a_road_counts_and_one_of_0_09_does_not():
+    road = lines_of(line([(-30, 0), (30, 0)]))
+    for dz, counted in ((0.1, True), (0.09, False)):
+        tris, cls = road_scene(heightfield([-40.0, 40.0], [-40.0, 3.5, 3.51, 40.0], lambda x, y: dz if y > 3.505 else 0.0))
+        rc = ck.road_checks(tris, cls, road, CLASSES)
+        assert (ck.count_steps(rc["steps"]) > 0) == counted
+        if counted:
+            assert 55 <= ck.count_steps(rc["steps"]) <= 61 and all(s["y"] > 0 for s in rc["steps"])      # (one side, the length)
+
+
+def test_a_slope_beside_a_road_is_no_step_but_a_cliff_is():
+    road = lines_of(line([(-30, 0), (30, 0)]))
+    tris, cls = road_scene(heightfield([-40.0, 40.0], [-40.0, 40.0], lambda x, y: 0.2 * y))
+    assert ck.count_steps(ck.road_checks(tris, cls, road, CLASSES)["steps"]) == 0
+    tris, cls = road_scene(heightfield([-40.0, 40.0], [-40.0, 3.5, 3.51, 40.0], lambda x, y: -5.0 if y > 3.505 else 0.0))
+    runs = ck.step_runs(ck.road_checks(tris, cls, road, CLASSES)["steps"])
+    assert len(runs) == 1 and runs[0]["step"] == 5.0 and runs[0]["kind"] == "ground"
+
+
+def _overpass(approach_z):
+    """A deck at z 3 over a ground road at z 0 in a trench, its approaches at approach_z; the ground road ends at both its ends."""
+    terrain = heightfield([-40.0, 40.0], [-40.0, -10.01, -10.0, 10.0, 10.01, 40.0],
+                          lambda x, y: approach_z if abs(y) > 10.005 else 0.0)
+    deck = plate(-4.0, 4.0, -10.0, 10.0, 3.0)
+    tris, cls = road_scene(terrain, [deck])
+    lines = lines_of(line([(-30, 0), (30, 0)], rid="road"), line([(0, -40), (0, 40)], [(0.375, 0.625, "bridge")], 4.0, "over"))
+    return ck.road_checks(tris, cls, lines, CLASSES)
+
+
+def test_a_deck_over_a_ground_road_and_its_approach_meeting_that_roads_level_count_nothing():
+    rc = _overpass(3.0)
+    assert rc["steps"] == []
+    assert not [e for e in rc["ends"] if e["kind"] in ("broken", "missing")]
+    assert [e["kind"] for e in rc["ends"] if e["what"] == "bridge"] == ["joined", "joined"]
+
+
+def test_a_deck_ending_above_its_approach_is_a_step_and_a_broken_join():
+    rc = _overpass(2.0)
+    assert ck.count_steps(rc["steps"]) > 0 and {s["kind"] for s in rc["steps"]} == {"bridge"}
+    assert ck.count_ends(rc["ends"], "broken") == 2
+    assert ck.count_ends(rc["ends"], "missing") == 0
+
+
+def test_a_road_end_with_nothing_abutting_is_missing_where_its_node_is_shared_and_dead_where_it_is_not():
+    tris, cls = road_scene(heightfield([-40.0, 40.0], [-40.0, 40.0], lambda x, y: 0.0))
+    for nodes, kind in (([(1, 2), (2, 3)], "missing"), ([(1, 2), (4, 3)], "dead")):
+        # (two ground roads 20 m apart whose ends are not near: only the OSM node says they should join)
+        lines = lines_of(line([(-30, 0), (-15, 0)], rid="a"), line([(15, 0), (30, 0)], rid="b"))
+        lines["road_nodes"] = nodes
+        rc = ck.road_checks(tris, cls, lines, CLASSES)
+        assert [e["kind"] for e in rc["ends"] if e["node"] == 2] == [kind] * (2 if kind == "missing" else 1)
+
+
+def test_ends_that_touch_at_another_height_are_a_broken_join_whatever_the_graph_says():
+    # two decks end to end, the second 0.3 m higher; no node ids at all (nothing is "connected")
+    d1 = plate(-4.0, 4.0, -20.0, 0.0, 3.0)
+    d2 = plate(-4.0, 4.0, 0.0, 20.0, 3.3)
+    tris, cls = road_scene(heightfield([-40.0, 40.0], [-40.0, 40.0], lambda x, y: 0.0), [d1, d2])
+    lines = lines_of(line([(0, -20), (0, 0)], [(0.0, 1.0, "bridge")], 4.0, "a"), line([(0, 0), (0, 20)], [(0.0, 1.0, "bridge")], 4.0, "b"))
+    rc = ck.road_checks(tris, cls, lines, CLASSES)
+    assert ck.count_ends(rc["ends"], "broken") == 2

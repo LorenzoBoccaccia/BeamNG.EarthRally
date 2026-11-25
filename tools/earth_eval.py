@@ -19,8 +19,8 @@ per tree, Earth's plan cache off), then:
   <out>/report.md       one row per junction: same / changed, how much of the surface changed what it is, how far the
                         ground, the roads, the decks and the rails moved (max and 99th percentile, m), and the geometry
                         checks' counts before -> after (earth_checks: vehicles hitting a road or rail not their own, crossings
-                        at different levels whose meshes cut each other, in the close-up and in the 1 km overview); a
-                        junction where one grows is "worse" whatever else
+                        at different levels whose meshes cut each other, m of road step, broken and missing road ends, each in the close-up
+                        and in the 1 km overview); a junction where one grows is "worse" whatever else
   <out>/report.json     the same numbers
 
 A junction is "same" when nothing moved more than SAME_M, "minor" when no more than MINOR_KIND of it changed what it is and nothing
@@ -302,7 +302,10 @@ def verdict_line(res):
         return "error: " + res["error"]
     parts = [f"{g} up to {res[g]['max']:.2f} m" for g in GROUPS if res[g]["n"] and res[g]["max"] > SAME_M]
     ck = res.get("checks", {})
-    short = {"vehicles_hit": "vehicles hitting", "crossings_cut": "crossings cutting", "overview_crossings_cut": "in 1 km"}
+    short = {"vehicles_hit": "vehicles hitting", "crossings_cut": "crossings cutting", "overview_crossings_cut": "in 1 km",
+             "road_steps_m": "road steps m", "overview_road_steps_m": "road steps m in 1 km",
+             "road_ends_broken": "broken road ends", "overview_road_ends_broken": "broken road ends in 1 km",
+             "road_ends_missing": "missing road ends", "overview_road_ends_missing": "missing road ends in 1 km"}
     hits = ", ".join(f"{short[k]} {b} -> {a}" for k, (b, a) in ck.items() if b is not None or a is not None)
     return (("WORSE, " if res.get("worse") else "") + {"changed": "CHANGED", "minor": "minor change"}.get(res["verdict"], "same") +
             f": class changed on {100 * res['kind_changed']:.2f} % of the close-up" + ("; " + ", ".join(parts) if parts else "") +
@@ -338,7 +341,13 @@ def eval_picture(j, a, res, log):
 
 CHECKS = (("vehicles_hit", "vehicles hitting a road or rail not their own"),
           ("crossings_cut", "crossings at different levels with meshes cutting each other"),
-          ("overview_crossings_cut", "the same in the 1 km overview"))
+          ("overview_crossings_cut", "the same in the 1 km overview"),
+          ("road_steps_m", "m of road edge with a step beyond it (earth_checks.STEP_M)"),
+          ("overview_road_steps_m", "the same in the 1 km overview"),
+          ("road_ends_broken", "road ends joined to a surface at another height"),
+          ("overview_road_ends_broken", "the same in the 1 km overview"),
+          ("road_ends_missing", "road ends whose OSM node another road shares, nothing built there"),
+          ("overview_road_ends_missing", "the same in the 1 km overview"))
 
 
 def load_checks(path):
@@ -434,10 +443,11 @@ def run_junction(j, a, log):
 
 def red(res):
     """Why junction result res is red (an error, a build stopped early, a vehicle hitting, meshes cutting in the close-up or
-    the 1 km overview, after the change), or None when it is not."""
+    the 1 km overview, after the change), or None when it is not. The road steps and ends are reported, and "worse" when
+    they grow, but not red: a real road has some."""
     if res.get("error"):
         return res["error"]
-    what = [f"{(res.get('checks', {}).get(k) or [None, None])[1]} {name}" for k, name in CHECKS
+    what = [f"{(res.get('checks', {}).get(k) or [None, None])[1]} {name}" for k, name in CHECKS[:3]
             if (res.get("checks", {}).get(k) or [None, None])[1]]
     return "; ".join(what) or None
 
@@ -465,7 +475,10 @@ def flagged_junctions(results):
     out = []
     for r in results:
         what = [(name, (r.get("checks", {}).get(k) or [None, None])[1]) for k, name in
-                (("vehicles_hit", "yellow"), ("crossings_cut", "red"), ("overview_crossings_cut", "red in 1 km"))]
+                (("vehicles_hit", "yellow"), ("crossings_cut", "red"), ("overview_crossings_cut", "red in 1 km"),
+                 ("road_steps_m", "road step m (lime)"), ("overview_road_steps_m", "road step m in 1 km"),
+                 ("road_ends_broken", "broken road ends (dark red)"), ("overview_road_ends_broken", "broken road ends in 1 km"),
+                 ("road_ends_missing", "missing road ends"), ("overview_road_ends_missing", "missing road ends in 1 km"))]
         what = [(n, v) for n, v in what if v]
         if what:
             out.append((r["name"], what))
@@ -498,13 +511,14 @@ def timing_rows(results):
 
 def write_report(results, a):
     rows = ["| junction | result | class changed | ground max / p99 (m) | road max | deck max | rail max | vehicles hitting "
-            "| crossings cutting | cutting in 1 km |", "|---|---|---|---|---|---|---|---|---|---|"]
+            "| crossings cutting | cutting in 1 km | road steps m | in 1 km | broken ends | in 1 km | missing ends | in 1 km |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         if r.get("timeout"):
             rows.append(f"| {r['name']} | **timeout** after {r['timeout_s']} s (limit {r['limit_s']:g} s) | | | | | | | | |")
             continue
         if r.get("error"):
-            rows.append(f"| {r['name']} | error: {r['error']} | | | | | | | | |")
+            rows.append(f"| {r['name']} | error: {r['error']} |" + " |" * 14)
             continue
         g = r["ground"]
         ck = r.get("checks", {})

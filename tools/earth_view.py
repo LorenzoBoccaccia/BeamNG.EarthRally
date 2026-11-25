@@ -25,7 +25,12 @@ one directional (Lambert) light and a little ambient light, in flat colours:
               isn't its own (earth_checks.vehicle_hits: from the meshes, exact)
   red         where two of the map's lines cross at different levels, the meshes of one cutting through the other's: a deck
               through a track, a track through a road's ground (earth_checks.penetrations); also in the overview
-  The counts of both are in the log and, with --dump, in <name>_checks.json (tools/earth_eval.py compares them)
+  lime        a post at each metre of a road's edge with a step beyond it of earth_checks.STEP_M or more (earth_checks.
+              road_checks: the edge of a ground road's carriageway, a bridge's or long tunnel's end; not a deck's sides)
+  dark red    a post at a road end (a bridge's, a long tunnel's, a ground road's) whose join is broken, the surface that goes on
+              from it at another height, or missing, nothing abutting it where its OSM node is another road's end (earth_checks.
+              road_checks); the meshes and the map's lines are read, never Earth's road graph; also in the overview
+  The counts of all are in the log and, with --dump, in <name>_checks.json (tools/earth_eval.py compares them)
 
 The meshes are the ones Earth writes for the game: each tile's .cdae files are read back (Earth's cdae.read), so what is drawn is what
 the game would load, closed solids included. A picture is an orthographic camera, rasterised by a numpy z-buffer (headless, no GPU):
@@ -83,13 +88,15 @@ BLOCK_STEP = 128            # a block's centre is a multiple of this (m)
 TILE = 256.0                # roads.TILE: an anchor road tile's side (m)
 
 # ---- classes: what a triangle is, its debug colour, its name in the legend ---------------------------------------------------
-GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON, MISSING, ROSE, FELL, HIT, CUT = range(17)
+GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL, WALK, BARRIER, OTHER, TRUCK, WAGON, MISSING, ROSE, FELL, HIT, CUT, STEP, JOIN = range(19)
 CLASS_NAME = ["ground", "ground moved by the rally grader", "road", "bridge deck", "rail", "building", "tunnel tube / portal",
               "sidewalk", "median barrier", "other mesh (--kinds)", "reference truck, 4 m high (a signed limit: its height)",
               "reference wagon, 4.3 m high", "the map's bridge with no deck, or railway with no track, drawn",
               "ground risen since before", "ground fallen since before",
               "a truck or wagon whose body hits a road, deck, track or tube not its own (earth_checks)",
-              "road / rail meshes cutting each other where the map has them at different levels (earth_checks)"]
+              "road / rail meshes cutting each other where the map has them at different levels (earth_checks)",
+              "road step: a post per metre of edge (earth_checks)",
+              "broken or missing road end (earth_checks)"]
 CLASS_RGB = np.array([
     (0.55, 0.38, 0.22),     # ground: brown
     (1.00, 0.00, 1.00),     # moved by the grader: magenta
@@ -108,6 +115,8 @@ CLASS_RGB = np.array([
     (0.25, 0.45, 0.95),     # ground that fell since before: blue
     (1.00, 0.93, 0.00),     # a vehicle hitting what isn't its own: yellow
     (1.00, 0.00, 0.00),     # meshes cutting each other at a crossing of different levels: red
+    (0.60, 0.95, 0.00),     # a road step: lime
+    (0.45, 0.00, 0.10),     # a broken or missing road end: dark red
 ])
 CHECK_CLASSES = {"ground": (0, 1), "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
 CHECKS = dict(CHECK_CLASSES)    # (the classes the checks run with: main adds what the loaded Earth tree draws, rail_tunnels)
@@ -1047,7 +1056,9 @@ def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
 def map_lines(a, frame, box, log, margin=30.0):
     """({"road": [(xy (k, 2), ranges)], "rail": [...]}, limits): Earth's roads (not paths) and railways round box from its map
     cells, each line in the frame with its bridge / tunnel ranges (roads.level_ranges), once per feature; and the roads'
-    height limits (height_limits). (None, []) when Earth's map data can't be read."""
+    height limits (height_limits). "road_half": each road's carriageway half width; "road_nodes": the OSM nodes (ints, None
+    where there is none) of its two ends, read from Overture's connectors (their src_record n<node id>), which lie on the ends.
+    (None, []) when Earth's map data can't be read."""
     try:
         bw = earth_state(a, log)
         md = getattr(bw._s, "md", None)
@@ -1057,11 +1068,14 @@ def map_lines(a, frame, box, log, margin=30.0):
         import roads
         xs, ys = np.array([box[0], box[2], box[0], box[2]]), np.array([box[1], box[1], box[3], box[3]])
         la, lo, _ = frame.enu_to_geodetic(xs, ys, 0.0)
-        out, seen = {"road": [], "rail": [], "road_cls": [], "road_id": [], "rail_id": [], "rail_cls": [], "road_half": []}, set()
+        out, seen = {"road": [], "rail": [], "road_cls": [], "road_id": [], "rail_id": [], "rail_cls": [], "road_half": [],
+                     "road_nodes": []}, set()
         for k in mapcells.cells_for_points(np.asarray(la, np.float64), np.asarray(lo, np.float64)):
-            feats = md.cell(k, layers=("roads",), kind="demand").layers.get("roads")
+            cell = md.cell(k, layers=("roads", "connectors"), kind="demand")
+            feats = cell.layers.get("roads")
             if feats is None or not len(feats):
                 continue
+            conn = connector_nodes(cell.layers.get("connectors"), frame)
             xy = feats.xy_in(frame)
             sub, cl = feats.attrs.get("subtype"), feats.attrs.get("class")
             specs = roads.road_specs(feats)     # (Earth's carriageway widths)
@@ -1088,10 +1102,36 @@ def map_lines(a, frame, box, log, margin=30.0):
                     out[kind + "_id"].append(fid)
                     if kind == "road":
                         out["road_half"].append(specs[i].width / 2 if specs[i] is not None else None)
+                        out["road_nodes"].append((node_at(conn, r[0]), node_at(conn, r[-1])))
         return out, height_limits(a, frame, box, log)
     except Exception as e:      # (the vehicles are then placed from the meshes alone)
         log(f"  map lines not read: {type(e).__name__}: {e}")
         return None, []
+
+
+NODE_TOL_M = earth_checks.NODE_TOL_M
+
+
+def connector_nodes(feats, frame):
+    """(xy (k, 2), node ids (k,)) of a cell's connectors that are an OSM node (Overture's src_record n<id>@<version>), or None."""
+    if feats is None or not len(feats) or feats.attrs.get("src_record") is None:
+        return None
+    rec = [str(v) for v in feats.attrs["src_record"]]
+    keep = [i for i, v in enumerate(rec) if re.match(r"n\d+", v)]
+    if not keep:
+        return None
+    xy = feats.xy_in(frame)
+    first = feats.coord_off[feats.ring_off[feats.part_off[:-1]]]        # (each point's one coordinate)
+    return xy[first[keep]], np.array([int(re.match(r"n(\d+)", rec[i]).group(1)) for i in keep], np.int64)
+
+
+def node_at(conn, p, tol=NODE_TOL_M):
+    """The OSM node whose connector lies within tol m of the point p (2,), else None."""
+    if conn is None:
+        return None
+    d = np.hypot(*(conn[0] - np.asarray(p)).T)
+    i = int(d.argmin())
+    return int(conn[1][i]) if d[i] <= tol else None
 
 
 def height_limits(a, frame, box, log):
@@ -1357,6 +1397,85 @@ def overview_cuts(z, x0, y0, holes, tris, cls, lines):
             near = (np.abs(gc[:, None, :] - c[None]) <= OVERVIEW_STEP).all(axis=2).any(axis=1)
             cut[G[near]] = True
     return cut, out
+
+
+ROAD_POST = (0.5, 0.5, 3.0)         # m: a post's side, side and height: a metre of road step, in the close-up
+ROAD_POST_END = (1.0, 1.0, 8.0)     # m: a broken or missing road end's
+ROAD_POST_OVERVIEW = 8.0            # times as big in the overview (a metre there is under a pixel)
+ROAD_LOG_MAX = 25                   # road steps (runs) and road ends named in the log each, the longest first
+
+
+def road_scene(z, x0, y0, holes, meshes, box):
+    """(tris, cls) the road checks read: the terrain of box at the lattice's own step (terrain_mesh) and the decks and tubes of
+    meshes ({kind: tris}) wholly in it."""
+    g, gc = terrain_mesh(z, x0, y0, box, holes)
+    T, C = [g], [gc]
+    for kind in ("deck", "tunnel"):
+        if kind in meshes:
+            m = inside_triangles(meshes[kind], box)
+            T.append(m)
+            C.append(np.full(len(m), KIND_CLASS[kind], np.int8))
+    return np.concatenate(T), np.concatenate(C)
+
+
+def in_box(x, y, box):
+    return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+def road_posts(rc, box, scale=1.0):
+    """(tris, cls): a STEP post at every metre of road step and a JOIN post at every broken or missing road end of rc
+    (earth_checks.road_checks) inside box, scale times the usual size."""
+    T, C = [], []
+    for s_ in rc["steps"]:
+        if in_box(s_["x"], s_["y"], box):
+            T.append(box_triangles((s_["x"], s_["y"], s_["z_edge"]), (1.0, 0.0, 0.0), *(v * scale for v in ROAD_POST)))
+            C.append(STEP)
+    for e in rc["ends"]:
+        if e["kind"] in ("broken", "missing") and in_box(e["x"], e["y"], box):
+            T.append(box_triangles((e["x"], e["y"], e["z"]), (1.0, 0.0, 0.0), *(v * scale for v in ROAD_POST_END)))
+            C.append(JOIN)
+    if not T:
+        return np.zeros((0, 3, 3)), np.zeros(0, np.int8)
+    return np.concatenate(T), np.repeat(np.array(C, np.int8), 12)
+
+
+def road_check_margin():
+    """m a road check's scene is scored short of its edge: its meshes end there (a bridge's end is looked for that far)."""
+    return earth_checks.END_SEEK_M + earth_checks.STEP_REACH_M
+
+
+def road_cases(rc, frame, box):
+    """([step runs], [broken and missing road ends]) of rc inside box, each with its lat and lon: the cases an analysis starts from
+    (the json), longest run first."""
+    def ll(x, y):
+        la, lo, _ = frame.enu_to_geodetic(np.array([x]), np.array([y]), 0.0)
+        return round(float(np.ravel(la)[0]), 7), round(float(np.ravel(lo)[0]), 7)
+    steps = [dict(r, lat=ll(r["x"], r["y"])[0], lon=ll(r["x"], r["y"])[1])
+             for r in earth_checks.step_runs([s_ for s_ in rc["steps"] if in_box(s_["x"], s_["y"], box)])]
+    ends = [dict(kind=e["kind"], what=e["what"], line=e["line"], node=e["node"], x=round(e["x"], 1), y=round(e["y"], 1),
+                 z=round(e["z"], 2), width=round(e["width"], 1), lat=ll(e["x"], e["y"])[0], lon=ll(e["x"], e["y"])[1])
+            for e in rc["ends"] if e["kind"] in ("broken", "missing") and in_box(e["x"], e["y"], box)]
+    return steps, ends
+
+
+def named_road(steps, ends, map_l, label):
+    """The log lines of road_cases' steps and ends (ROAD_LOG_MAX of each): where (lat, lon), how much, how tall and the map's line."""
+    out = []
+    for r in steps[:ROAD_LOG_MAX]:
+        near = lines_near(map_l, (r["x"], r["y"]), 3.0, n=2) if map_l else []
+        out.append(f"    {label} road step at {r['lat']:.6f},{r['lon']:.6f} (x {r['x']:.1f} y {r['y']:.1f}): {r['m']:g} m of {r['kind']} "
+                   f"edge, a step of {r['step']:.2f} m (edge z {r['z_edge']:.2f}, beyond z {r['z_beyond']:.2f})"
+                   + ("; " + "; ".join(line_name(n) for n in near) if near else ""))
+    if len(steps) > ROAD_LOG_MAX:
+        out.append(f"    {label}: {len(steps) - ROAD_LOG_MAX} more road steps in checks.json")
+    for e in ends[:ROAD_LOG_MAX]:
+        near = lines_near(map_l, (e["x"], e["y"]), 3.0, n=2) if map_l else []
+        out.append(f"    {label} {e['kind']} road end at {e['lat']:.6f},{e['lon']:.6f} (x {e['x']:.1f} y {e['y']:.1f}): a {e['what']} end, "
+                   f"{e['width']:.1f} m wide at z {e['z']:.2f}" + (f", OSM node {e['node']}" if e["node"] else "")
+                   + ("; " + "; ".join(line_name(n) for n in near) if near else ""))
+    if len(ends) > ROAD_LOG_MAX:
+        out.append(f"    {label}: {len(ends) - ROAD_LOG_MAX} more road ends in checks.json")
+    return out
 
 
 def inside_triangles(tris, box, margin=5.0):
@@ -1810,16 +1929,56 @@ def main():
     corners = np.array([[box[i], box[j], zz] for i in (0, 2) for j in (1, 3)
                         for zz in (float(tris[:, :, 2].min()), float(tris[:, :, 2].max()))])
     target = np.array([px, py, pz])
+    ov_box = overview_box(px, py)
+    ov_meshes = ov_map = None
+    ov_posts = (np.zeros((0, 3, 3)), np.zeros(0, np.int8))
+    if want_ov:
+        if not (x0 <= ov_box[0] and ov_box[2] <= x0 + z.shape[1] - 1 and y0 <= ov_box[1] and ov_box[3] <= y0 + z.shape[0] - 1):
+            log(f"  overview: part of the {2 * OVERVIEW_M:g} m square is off the block {blk}: no ground there")
+        ov_meshes = read_tiles(data_dir, a.aid, tiles_covering(px, py, OVERVIEW_M), kinds, log)
+        ov_map, _ = map_lines(a, frame, ov_box, log, margin=0.0)
+    # the road checks (earth_checks.road_checks) on the largest scene there is: the 1 km overview's, its meshes and the lattice's
+    # own ground, scored short of its edge where its meshes end, the close-up counting what lies in its box; with no overview
+    # the close-up's own scene, likewise short of its edge
+    sbox, smap, smeshes = (ov_box, ov_map, ov_meshes) if want_ov else (box, map_l, meshes)
+    if smap is not None:
+        m = road_check_margin()
+        rbox = (sbox[0] + m, sbox[1] + m, sbox[2] - m, sbox[3] - m)
+        rt, rcl = road_scene(z, x0, y0, None if a.no_holes else holes, smeshes, sbox)
+        rc = earth_checks.road_checks(rt, rcl, smap, CHECKS, rbox)
+        nodes = any(n is not None for pair in smap.get("road_nodes", []) for n in pair)
+        c_steps, c_ends = road_cases(rc, frame, box if want_ov else rbox)
+        checks.update(road_steps_m=earth_checks.count_steps(rc["steps"], box if want_ov else rbox),
+                      road_ends_broken=earth_checks.count_ends(rc["ends"], "broken", box if want_ov else rbox))
+        if nodes:
+            checks["road_ends_missing"] = earth_checks.count_ends(rc["ends"], "missing", box if want_ov else rbox)
+        else:
+            log("  road ends: the OSM node ids of the lines' ends are not in the map data: missing joins not scored")
+        log(f"  road steps: {checks['road_steps_m']:g} m of edge in the close-up, road ends: {checks['road_ends_broken']} broken"
+            + (f", {checks['road_ends_missing']} missing" if nodes else "") + " (lime and dark red posts)")
+        for line in named_road(c_steps, c_ends, smap, "close-up"):
+            log(line)
+        checks["road_steps_cases"], checks["road_ends_cases"] = c_steps, c_ends
+        if want_ov:
+            o_steps, o_ends = road_cases(rc, frame, rbox)
+            checks.update(overview_road_steps_m=earth_checks.count_steps(rc["steps"], rbox),
+                          overview_road_ends_broken=earth_checks.count_ends(rc["ends"], "broken", rbox))
+            if nodes:
+                checks["overview_road_ends_missing"] = earth_checks.count_ends(rc["ends"], "missing", rbox)
+            log(f"  overview: road steps {checks['overview_road_steps_m']:g} m of edge, road ends "
+                f"{checks['overview_road_ends_broken']} broken" + (f", {checks['overview_road_ends_missing']} missing" if nodes else ""))
+            for line in named_road(o_steps, o_ends, smap, "overview"):
+                log(line)
+            checks["overview_road_steps_cases"], checks["overview_road_ends_cases"] = o_steps, o_ends
+            ov_posts = road_posts(rc, rbox, ROAD_POST_OVERVIEW)
+        cp = road_posts(rc, box)
+        if len(cp[0]):
+            tris, cls = np.concatenate([tris, cp[0]]), np.concatenate([cls, cp[1]])
     panels, used_all = [], set()
     for v in views:
         if is_overview(v):
-            ov_box = overview_box(px, py)
-            if not (x0 <= ov_box[0] and ov_box[2] <= x0 + z.shape[1] - 1 and y0 <= ov_box[1] and ov_box[3] <= y0 + z.shape[0] - 1):
-                log(f"  overview: part of the {2 * OVERVIEW_M:g} m square is off the block {blk}: no ground there")
             dz = compare_heights(a.compare_data, a.aid, blk[0], blk[1], z, log) if a.compare_data else None
-            ov_meshes = read_tiles(data_dir, a.aid, tiles_covering(px, py, OVERVIEW_M), kinds, log)
             ot, oc = overview_scene(z, x0, y0, ov_box, None if a.no_holes else holes, ov_meshes, dz)
-            ov_map, _ = map_lines(a, frame, ov_box, log, margin=0.0)
             if ov_map is not None:
                 base_cls = np.where(np.isin(oc, (ROSE, FELL)), GROUND, oc)
                 ocut, oxings = overview_cuts(z, x0, y0, None if a.no_holes else holes, ot, base_cls, ov_map)
@@ -1830,6 +1989,8 @@ def main():
                     log(line)
             log(f"  overview: {len(ot)} triangles" + (f", {int((oc == ROSE).sum())} of rising ground and {int((oc == FELL).sum())}"
                                                      f" of falling ground since --compare-data" if dz is not None else ""))
+            if len(ov_posts[0]):
+                ot, oc = np.concatenate([ot, ov_posts[0]]), np.concatenate([oc, ov_posts[1]])
             cam = overview_camera(ot, target, W, H)
             ov_lines = [box_outline(z, x0, y0, box)] + stage_lines(a.geometry, frame, z, x0, y0, ov_box, a.line_z)
             img, used = render(ot, oc, cam, lines=ov_lines, needle=(px, py, pz, pz + 60.0), ss=a.ss, bias=a.bias)
