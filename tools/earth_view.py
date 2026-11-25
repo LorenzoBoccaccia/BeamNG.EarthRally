@@ -25,7 +25,7 @@ one directional (Lambert) light and a little ambient light, in flat colours:
               isn't its own (earth_checks.vehicle_hits: from the meshes, exact)
   red         where two of the map's lines cross at different levels, the meshes of one cutting through the other's: a deck
               through a track, a track through a road's ground (earth_checks.penetrations); also in the overview
-  lime        a post at each metre of a road's edge with a step beyond it of earth_checks.STEP_M or more (earth_checks.
+  lime        a post at each metre of a road's edge with a gap in z of earth_checks.STEP_M or more where it should touch the terrain or what continues it (earth_checks.
               road_checks: the edge of a ground road's carriageway, a bridge's or long tunnel's end; not a deck's sides)
   dark red    a post at a road end (a bridge's, a long tunnel's, a ground road's) whose join is broken, the surface that goes on
               from it at another height, or missing, nothing abutting it where its OSM node is another road's end (earth_checks.
@@ -118,7 +118,7 @@ CLASS_RGB = np.array([
     (0.60, 0.95, 0.00),     # a road step: lime
     (0.45, 0.00, 0.10),     # a broken or missing road end: dark red
 ])
-CHECK_CLASSES = {"ground": (0, 1), "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
+CHECK_CLASSES = {"ground": (0, 1), "road": 2, "deck": 3, "rail": 4, "tunnel": 6}     # (earth_checks' names for GROUND/MOVED, DECK, RAIL, TUNNEL)
 CHECKS = dict(CHECK_CLASSES)    # (the classes the checks run with: main adds what the loaded Earth tree draws, rail_tunnels)
 # What a vehicle's body may not cut: every Earth mesh, the terrain too (a cut's slope or a mound beside a road or a track,
 # a ridge at a junction, the ground of a bridge Earth did not build): GROUND, MOVED, ROAD, DECK, RAIL, BUILDING, TUNNEL. Its
@@ -1407,10 +1407,10 @@ ROAD_LOG_MAX = 25                   # road steps (runs) and road ends named in t
 
 def road_scene(z, x0, y0, holes, meshes, box):
     """(tris, cls) the road checks read: the terrain of box at the lattice's own step (terrain_mesh) and the decks and tubes of
-    meshes ({kind: tris}) wholly in it."""
+    meshes ({kind: tris}) wholly in it (the road mesh too: its edges are checked against the terrain)."""
     g, gc = terrain_mesh(z, x0, y0, box, holes)
     T, C = [g], [gc]
-    for kind in ("deck", "tunnel"):
+    for kind in ("road", "deck", "tunnel"):
         if kind in meshes:
             m = inside_triangles(meshes[kind], box)
             T.append(m)
@@ -1441,7 +1441,7 @@ def road_posts(rc, box, scale=1.0):
 
 def road_check_margin():
     """m a road check's scene is scored short of its edge: its meshes end there (a bridge's end is looked for that far)."""
-    return earth_checks.END_SEEK_M + earth_checks.STEP_REACH_M
+    return earth_checks.END_SEEK_M + earth_checks.SAMPLE_M
 
 
 def road_cases(rc, frame, box):
