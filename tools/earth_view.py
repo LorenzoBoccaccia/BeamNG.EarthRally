@@ -430,6 +430,11 @@ TRUCK_EVERY_M = 20.0                # m between the trucks' middles along a road
 SIDE_M = {"motorway": 1.75, "trunk": 1.75, "primary": 1.75, "secondary": 1.75, "tertiary": 1.75, "residential": 1.4,
           "unclassified": 1.4}
 DUP_ACROSS_M = 1.0                  # m across its heading another vehicle stands from one already placed: the same one
+# The roads in the order they claim a place when two vehicles would stand on each other (a slip road leaving its main road at a
+# shallow angle starts inside the main road's lane: the vehicle there is the main road's): through roads before the ones
+# that join them, a longer road before a shorter of its class.
+ROAD_RANK = {"motorway": 0, "trunk": 1, "primary": 2, "secondary": 3, "tertiary": 4, "unclassified": 5, "residential": 6,
+             "living_street": 7, "service": 8}
 WAGON_EVERY_M = 21.0                # m between the wagons' middles (nose to tail, 1 m apart)
 NEIGH_M = 12.0                      # m round a truck: the surface whose triangles give its middle, heading and slope (a
                                     # 7 m road read 8 m round its end was near square: its heading turned 15 deg)
@@ -875,7 +880,7 @@ def missing_on_lines(lines, surf, box, ground=None, bridges_only=False, top=Fals
 
 
 def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M, painted=True, box=None, probes=None,
-                      half=None):
+                      half=None, size=None, priority=None, inward=None):
     """[(base (3,), axis (3,))]: a vehicle every metres along each line of Earth's map, heading along it. lines: [(xy (k, 2),
     ranges)], ranges [(start, end, "bridge" | "tunnel")] fractions of the line (Earth's roads.level_ranges). Where it stands:
     - a ground stretch of a road (painted True): on the terrain, ground(x, y): Earth paints its ground roads into the terrain
@@ -890,12 +895,18 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
     first, the ones every metres around it.
     Its slope from the same surface LOOK_M ahead and behind (a wagon, top and half: half its length, its rigid body's chord: a
     0.25 m step in the track read +-4 % over 6 m, tilted a 20 m wagon's end 0.5 m into the rails ahead). None within 0.75 * every of one placed on the same level (copies
-    of one road, segments end to end). box (x0, y0, x1, y1): only points inside it (the view)."""
+    of one road, segments end to end). box (x0, y0, x1, y1): only points inside it (the view).
+    size (long, wide m): no vehicle stands where its footprint would overlap one already placed on the same level (two lines
+    that meet at a shallow angle run side by side over the stretch where their carriageways overlap: a vehicle on each is two
+    on one place, one of them half inside the other's lane). priority: per line, the order they claim their places in (lower
+    first, a probe's before all); the order of lines without it.
+    inward (needs size): per line, how far it is from the carriageway's own line (m, + to its left, 0: on it): on a bridge a
+    vehicle whose width is not all on the deck's surface at its level moves toward that line, as far as it needs (lane_on_deck)."""
     placed = np.zeros((0, 3))
     heads = np.zeros((0, 2))
     pb = {}
     out = []
-    chosen = []                     # (probe?, base, axis) of every line, placed probes first
+    chosen = []                     # (probe?, moved in?, line, base, axis) of every line, placed probes first
     for li, (xy, ranges) in enumerate(lines):
         L = _length(xy)
         pts = [(p, t, f, False) for p, t, f in along(xy, every)]
@@ -919,6 +930,8 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
                 lv, pref = [g], None
             elif kind == "bridge":
                 lv = [v for v in surface_levels(surf, p, t_, top) if g is None or v >= g - DECK_UNDER_M]
+                if lv and size is not None and inward is not None and inward[li]:
+                    lv = own_levels(surf, p, t_, inward[li], lv, top, level)
                 pref = max(lv) if lv else None
             else:
                 lv = surface_levels(surf, p, t_, top)
@@ -929,6 +942,11 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
         for (p, t, _f, probe), z, kind in zip(pts, _choose(cands, prefs), kinds):
             if z is None:
                 continue
+            moved = False
+            if kind == "bridge" and size is not None and inward is not None and inward[li]:
+                q = lane_on_deck(surf, p, t, z, inward[li], size[1])
+                moved = bool((q != p).any())
+                p = q
             zs = []
             look = half if half and top else LOOK_M          # (a wagon lies on its chord: its pitch over its own length)
             for d in (look, -look):
@@ -946,8 +964,10 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
                 slope = (zs[0] - z) / look if zs[0] is not None else (z - zs[1]) / look
             else:
                 slope = 0.0
-            chosen.append((probe, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
-    for probe, base, axis in sorted(chosen, key=lambda c: not c[0]):        # (the probes first)
+            chosen.append((probe, moved, li, np.array([p[0], p[1], z]), np.array([t[0], t[1], slope])))
+    prio = priority if priority is not None else list(range(len(lines)))
+    for probe, _moved, li, base, axis in sorted(chosen, key=lambda c: (not c[0], c[1], prio[c[2]])):    # (the probes first, then
+        # the vehicles in their lane before the ones moved in off a deck's edge: a place is the lane's whose it was)
         if len(placed):
             near = _near(placed, pb, every, base, every * 0.75, level)
             if len(near):           # (the same one: along its heading within 0.75 every, across within DUP_ACROSS_M)
@@ -957,12 +977,40 @@ def vehicles_on_lines(lines, surf, every, top=False, ground=None, level=LEVEL_M,
                 across = np.abs(d[:, 0] * h[:, 1] - d[:, 1] * h[:, 0])
                 if ((a_l <= every * 0.75) & (across <= DUP_ACROSS_M)).any():
                     continue
+                if size is not None:
+                    a2 = np.asarray(axis[:2], np.float64)
+                    me = (base[0], base[1], *(a2 / max(float(np.hypot(*a2)), 1e-9)))
+                    hs = (size[0] / 2.0, size[1] / 2.0)
+                    if any(footprints_overlap(me, hs, (*placed[j, :2], *heads[j]), hs) for j in near):
+                        continue
         out.append((base, axis))
         placed = np.vstack([placed, base])
         a2 = np.asarray(axis[:2], np.float64)
         heads = np.vstack([heads, a2 / max(float(np.hypot(*a2)), 1e-9)])
         pb = _buckets(placed, every)
     return out
+
+
+def footprints_overlap(a, ha, b, hb):
+    """Do two vehicles' footprints overlap in plan (separating axes)? a, b: (x, y, dx, dy) middle and unit heading; ha, hb: half
+    their length and half their width (m). Touching is not overlapping."""
+    for (x, y, dx, dy) in (a, b):
+        for ax in ((dx, dy), (-dy, dx)):
+            d = (b[0] - a[0]) * ax[0] + (b[1] - a[1]) * ax[1]
+            ra = ha[0] * abs(ax[0] * a[2] + ax[1] * a[3]) + ha[1] * abs(-ax[0] * a[3] + ax[1] * a[2])
+            rb = hb[0] * abs(ax[0] * b[2] + ax[1] * b[3]) + hb[1] * abs(-ax[0] * b[3] + ax[1] * b[2])
+            if abs(d) >= ra + rb:
+                return False
+    return True
+
+
+def _side_offset(c, half, xy):
+    """m from a road's line its trucks stand (0: one on the line itself): SIDE_M of its class, kept inside half (its carriageway's
+    half width less half a truck's, None: not known)."""
+    off = SIDE_M.get(str(c), 0.0)
+    if half is not None:
+        off = min(off, float(half) - TRUCK_LWH[1] / 2)
+    return 0.0 if off <= 0 or len(xy) < 2 else off
 
 
 def side_lines(lines, classes, halves=None):
@@ -972,15 +1020,72 @@ def side_lines(lines, classes, halves=None):
     against the fill of a track's end beside it)."""
     out = []
     for k, ((xy, ranges), c) in enumerate(zip(lines, classes)):
-        off = SIDE_M.get(str(c), 0.0)
-        half = halves[k] if halves is not None and k < len(halves) else None
-        if half is not None:
-            off = min(off, float(half) - TRUCK_LWH[1] / 2)
-        if off <= 0 or len(xy) < 2:
+        off = _side_offset(c, halves[k] if halves is not None and k < len(halves) else None, xy)
+        if off <= 0:
             out.append((xy, ranges))
             continue
         out += [(offset_line(xy, off), ranges), (offset_line(xy, -off), ranges)]
     return out
+
+
+def side_roads(lines, classes, halves=None):
+    """Per side line of side_lines(lines, classes, halves) the index of the road it is a side of."""
+    out = []
+    for k, ((xy, _ranges), c) in enumerate(zip(lines, classes)):
+        out += [k] * (2 if _side_offset(c, halves[k] if halves is not None and k < len(halves) else None, xy) > 0 else 1)
+    return out
+
+
+def claim_order(roads, lines, classes):
+    """Per side line the order it claims its places in (vehicles_on_lines' priority, lower first): its road's class (ROAD_RANK,
+    an unknown class last), then the longer road. roads: side_roads; lines / classes: the roads and their classes."""
+    return [(ROAD_RANK.get(str(classes[r]), len(ROAD_RANK)), -_length(lines[r][0])) for r in roads]
+
+
+def side_offsets(lines, classes, halves=None):
+    """Per side line of side_lines(lines, classes, halves) its signed distance from its road's line (m, + to its left; 0 on it)."""
+    out = []
+    for k, ((xy, _ranges), c) in enumerate(zip(lines, classes)):
+        off = _side_offset(c, halves[k] if halves is not None and k < len(halves) else None, xy)
+        out += [off, -off] if off > 0 else [0.0]
+    return out
+
+
+def own_levels(surf, p, t, off, lv, top=False, level=LEVEL_M):
+    """The levels lv (the surfaces under a lane's point p, heading t, off m to the left of its road's line) that are under the line
+    itself too (within `level`): a lane at a deck's edge has another carriageway's deck under its other side, at a height of its
+    own, which the vehicle in this lane does not stand on. lv when the line has no surface under it."""
+    n = np.array([-t[1], t[0]])
+    lc = surface_levels(surf, p - off * n, t, top)
+    if not lc:
+        return lv
+    keep = [v for v in lv if min(abs(v - w) for w in lc) <= level]
+    return keep or lv
+
+
+def lane_on_deck(surf, p, t, z, off, width, steps=0.25):
+    """The point where a vehicle `width` m wide, standing at p (2,) heading t (2,) with its wheels at z on a deck, lies wholly on
+    the deck's surface at its level: p, or the nearest point to it toward the road's line (off: p's distance from it, + to the
+    left of t) whose two sides, in the middle and LOOK_M ahead and behind, have a surface within BODY_BASE_M of z (the vehicle's
+    body starts there: a deck's edge, its parapet or the lane of a deck beside it at another level is not under it). p when
+    no point up to the line itself does. A deck drawn off its line (two carriageways pushed apart where they ran side by side)
+    is narrower on one side than the lane a line's side stands at."""
+    n = np.array([-t[1], t[0]])
+    sgn = -1.0 if off > 0 else 1.0
+
+    def on(q):
+        for a in (0.0, LOOK_M, -LOOK_M):
+            for side in (width / 2.0, -width / 2.0):
+                h = surf.heights(*(q + a * t + side * n))
+                if not len(h) or float(np.abs(np.asarray(h) - z).min()) > earth_checks.BODY_BASE_M:
+                    return False
+        return True
+
+    for d in np.arange(0.0, abs(off) + 1e-9, steps):
+        q = p + sgn * d * n
+        if on(q):
+            return q
+    return p
 
 
 def offset_line(xy, d):
@@ -1022,9 +1127,12 @@ def reference_vehicles(tris, cls, limits=(), lines=None, ground=None):
         rs, ts = Surfaces(tris[road]), Surfaces(tris[rail])
         roads_, rails_ = lines.get("road", []), lines.get("rail", [])
         others = [(xy, r, False) for xy, r in roads_] + [(xy, r, True) for xy, r in rails_]
-        sides = side_lines(roads_, lines.get("road_cls", [None] * len(roads_)), lines.get("road_half"))
+        road_cls = lines.get("road_cls", [None] * len(roads_))
+        sides = side_lines(roads_, road_cls, lines.get("road_half"))
         probes = [crossings_under(xy, others) for xy, _r in sides]
-        trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes, half=TRUCK_LWH[0] / 2)
+        trucks = vehicles_on_lines(sides, rs, TRUCK_EVERY_M, ground=ground, box=box, probes=probes, half=TRUCK_LWH[0] / 2,
+                                   size=TRUCK_LWH[:2], priority=claim_order(side_roads(roads_, road_cls, lines.get("road_half")), roads_, road_cls),
+                                   inward=side_offsets(roads_, road_cls, lines.get("road_half")))
         wagons = vehicles_on_lines(lines.get("rail", []), ts, WAGON_EVERY_M, top=True, ground=ground, painted=False, box=box,
                                    half=WAGON_LWH[0] / 2)
         decks = Surfaces(tris[(cls == DECK) & up])      # (a bridge's: only a deck counts, not a road's edges painted under it)
