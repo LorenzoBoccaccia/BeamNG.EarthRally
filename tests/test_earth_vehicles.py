@@ -254,3 +254,95 @@ def test_a_truck_at_the_scenes_edge_lies_on_its_ramp_not_level():
                                painted=False)
     edge = [axis for base, axis in got if abs(base[0] - 30.0) < 0.5]
     assert edge and abs(edge[0][2] - 0.1) < 0.005, got
+
+
+def footprint(box):
+    """(x, y, dx, dy): the middle and the unit heading in plan of a truck's box (12, 3, 3)."""
+    mid = box[..., :2].reshape(-1, 2).mean(axis=0)
+    c = box[0]                       # (the bottom face's first triangle: v000 v100 v110)
+    d = (c[1] - c[0])[:2]
+    return (mid[0], mid[1], *(d / np.hypot(*d)))
+
+
+def merge_scene():
+    """A main road along x and a slip road leaving it at 8 degrees from x = -30, both on the ground (painted: trucks on the
+    terrain). The slip road is listed FIRST: the order the lines are given in decides nothing."""
+    main = np.array([[-80.0, 0.0], [80.0, 0.0]])
+    ramp = np.array([[-30.0, 0.0], [80.0, 110.0 * np.tan(np.radians(8.0))]])
+    lines = {"road": [(ramp, []), (main, [])], "road_cls": ["service", "primary"], "rail": []}
+    ground = strip(-90, 90, -20, 30, 0.0)
+    return lines, ground, np.full(len(ground), ev.GROUND, np.int8)
+
+
+def test_a_slip_road_joining_its_main_road_at_a_shallow_angle_puts_no_truck_on_one_of_the_main_roads():
+    """Where the two carriageways overlap in plan (the slip road starts on the main road's line), the vehicle there is the main
+    road's: a truck of the slip road lying half in the main road's lane is two trucks on one place, and where it cut the
+    main road's edge (a deck's parapet at the nose) it was counted a hit of its own."""
+    lines, ground, cls = merge_scene()
+    t, c = ev.reference_vehicles(ground, cls, lines=lines, ground=lambda x, y: 0.0)
+    b = boxes(t[c == ev.TRUCK])
+    fps = [footprint(x) for x in b]
+    hs = (ev.TRUCK_LWH[0] / 2, ev.TRUCK_LWH[1] / 2)
+    over = [(i, j) for i in range(len(fps)) for j in range(i + 1, len(fps)) if ev.footprints_overlap(fps[i], hs, fps[j], hs)]
+    assert over == []
+    on_main = [f for f in fps if abs(abs(f[1]) - 1.75) < 0.2 and abs(f[3]) < 0.01]
+    assert len(on_main) >= 6                                                # (the main road keeps its trucks, both sides)
+    assert any(f[3] > 0.05 for f in fps)                                   # (the slip road its own, once clear of the main's lane)
+
+
+def test_trucks_on_two_levels_over_one_place_are_not_one_place():
+    """A deck over a road, their lines running together: a footprint overlap at another level (7 m up) is no overlap."""
+    tris, cls = scene_road_under_deck()
+    lines = {"road": [(np.array([[-60.0, 0.0], [60.0, 0.0]]), []), (np.array([[0.0, -40.0], [0.0, 40.0]]), [(0.0, 1.0, "bridge")])],
+             "road_cls": ["primary", "primary"], "rail": []}
+    t, c = ev.reference_vehicles(tris, cls, lines=lines, ground=lambda x, y: 0.0)
+    bottoms = boxes(t[c == ev.TRUCK])[..., 2].min(axis=(1, 2))
+    assert (np.isclose(bottoms, 0.0)).any() and (np.isclose(bottoms, 7.0)).any()
+
+
+def test_footprints_overlap_only_when_they_share_area():
+    a = (0.0, 0.0, 1.0, 0.0)
+    hs = (6.0, 1.275)
+    assert ev.footprints_overlap(a, hs, (5.0, 2.0, 1.0, 0.0), hs)                 # side by side, 2 m apart: lanes overlap
+    assert not ev.footprints_overlap(a, hs, (0.0, 2.55, 1.0, 0.0), hs)           # touching: not
+    assert not ev.footprints_overlap(a, hs, (12.5, 0.0, 1.0, 0.0), hs)           # nose to tail, a gap
+    assert ev.footprints_overlap(a, hs, (7.0, 3.0, 0.0, 1.0), hs)                # across: the end of one over the side of the other
+
+
+def test_a_truck_whose_lane_hangs_off_a_deck_drawn_off_its_line_stands_on_the_deck():
+    """Two carriageways side by side are drawn pushed apart: the deck is narrower toward its neighbour than the lane a line's side
+    stands at (1.75 m: its truck reached 1 m past the deck's edge and its parapet cut the body). The truck moves in until its
+    whole width is on the deck (where that is the other lane's place, it is that lane's: one place, one truck); the lane on the
+    wide side stays."""
+    deck = strip(-80, 80, -5.0, 2.0, 5.0)                                          # (the line at y = 0: 2 m of deck on its left)
+    lines = {"road": [(np.array([[-70.0, 0.0], [70.0, 0.0]]), [(0.0, 1.0, "bridge")])], "road_cls": ["primary"], "rail": []}
+    t, c = ev.reference_vehicles(deck, np.full(len(deck), ev.ROAD, np.int8), lines=lines, ground=lambda x, y: 0.0)
+    b = boxes(t[c == ev.TRUCK])
+    ys = b.mean(axis=(1, 2))[:, 1]
+    assert np.sum(np.isclose(ys, -1.75)) >= 3                                      # (the lane on the wide side stays)
+    assert np.all(b[..., 1].max(axis=(1, 2)) <= 2.0 + 1e-6) and np.all(b[..., 1].min(axis=(1, 2)) >= -5.0)   # (none hangs off)
+
+
+def test_lane_on_deck_keeps_a_lane_that_is_on_the_deck_and_the_place_when_no_point_is():
+    deck = ev.Surfaces(strip(-20, 20, -5.0, 5.0, 5.0))
+    t = np.array([1.0, 0.0])
+    p = np.array([0.0, 1.75])
+    assert np.allclose(ev.lane_on_deck(deck, p, t, 5.0, 1.75, 2.55), p)                  # (on it: not moved)
+    assert np.allclose(ev.lane_on_deck(deck, np.array([0.0, 20.0]), t, 5.0, 1.75, 2.55), [0.0, 20.0])   # (off the deck: not moved)
+    narrow = ev.Surfaces(strip(-20, 20, -1.0, 1.0, 5.0))                                 # (2 m of deck: no lane fits it)
+    assert np.allclose(ev.lane_on_deck(narrow, p, t, 5.0, 1.75, 2.55), p)
+
+
+def test_a_lane_at_a_decks_edge_stands_on_its_own_deck_not_the_one_beside_it_at_another_level():
+    """Two carriageways one over the other's edge at different heights: a truck of the lower road's lane that reaches under the
+    upper deck's edge took the highest surface there, the upper deck, and stood on a road that is not its own, in its parapet."""
+    upper = strip(-80, 80, -8.0, 0.6, 8.0)
+    lower = strip(-80, 80, -0.2, 7.0, 5.0)
+    tris = np.concatenate([upper, lower])
+    cls = np.full(len(tris), ev.ROAD, np.int8)
+    lines = {"road": [(np.array([[-70.0, 1.7], [70.0, 1.7]]), [(0.0, 1.0, "bridge")])], "road_cls": ["primary"], "rail": []}
+    t, c = ev.reference_vehicles(tris, cls, lines=lines, ground=lambda x, y: 0.0)
+    b = boxes(t[c == ev.TRUCK])
+    assert len(b) >= 3
+    assert np.allclose(b[..., 2].min(axis=(1, 2)), 5.0)                                   # (all on the lower deck)
+    assert np.all(b[..., 1].min(axis=(1, 2)) >= -0.2 - 1e-6)                              # (none reaching under the upper's edge)
